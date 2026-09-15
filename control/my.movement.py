@@ -52,47 +52,53 @@ class MyRobot(HamBot):
                 self.stop_motors()
                 break
 #Lokman part
-      def drive_circle(self, radius, direction, outer_speed=40):
-        AXLE_WIDTH = 0.205
-        half_axle = AXLE_WIDTH / 2
+      def drive_circle(self, radius, angular_speed):
+    AXLE_WIDTH = 0.205
+    half_axle = AXLE_WIDTH / 2
 
-        if radius <= half_axle:
-            raise ValueError("Radius is too small for the robot.")
+    omega = abs(angular_speed)
 
-        direction = direction.upper()
+    inner_speed_mps = omega * (radius - half_axle)
+    outer_speed_mps = omega * (radius + half_axle)
 
-        if direction not in ("CCW", "CW"):
-            raise ValueError("Direction must be 'CCW' or 'CW'.")
+    # Convert linear wheel speed to RPM
+    inner_rpm = (
+        inner_speed_mps / self.WHEEL_RADIUS
+    ) * 60 / (2 * 3.141592653589793)
 
-        speed_ratio = (radius - half_axle) / (radius + half_axle)
-        inner_speed = outer_speed * speed_ratio
+    outer_rpm = (
+        outer_speed_mps / self.WHEEL_RADIUS
+    ) * 60 / (2 * 3.141592653589793)
 
-        if direction == "CCW":
-            left_speed = inner_speed
-            right_speed = outer_speed
-        else:
-            left_speed = outer_speed
-            right_speed = inner_speed
+    # Positive angular speed = CCW
+    if angular_speed > 0:
+        left_speed = inner_rpm
+        right_speed = outer_rpm
 
-        prev_heading = self.get_heading()
-        total_rotation = 0
+    # Negative angular speed = CW
+    else:
+        left_speed = outer_rpm
+        right_speed = inner_rpm
 
-        self.set_left_motor_speed(left_speed)
-        self.set_right_motor_speed(right_speed)
+    prev_heading = self.get_compass_reading()
+    total_rotation = 0
 
-        while True:
-            current_heading = self.get_heading()
+    self.set_left_motor_speed(left_speed)
+    self.set_right_motor_speed(right_speed)
 
-            delta_heading = (
-                (current_heading - prev_heading + 180) % 360
-            ) - 180
+    while True:
+        current_heading = self.get_compass_reading()
 
-            total_rotation += delta_heading
-            prev_heading = current_heading
+        delta_heading = (
+            (current_heading - prev_heading + 180) % 360
+        ) - 180
 
-            if abs(total_rotation) >= 360:
-                self.stop_motors()
-                break
+        total_rotation += delta_heading
+        prev_heading = current_heading
+
+        if abs(total_rotation) >= 360:
+            self.stop_motors()
+            break
 
 
 
