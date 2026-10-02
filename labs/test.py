@@ -1,4 +1,4 @@
-from hambot_lab.control.MyRobot import MyRobot
+from control.MyRobot import MyRobot
 import time
 
 TIME = 0.5
@@ -50,14 +50,20 @@ def triangle(robot, speed_for, speed_rot, side):
 
 def main():
     robot = MyRobot()
+
+    robot.lidar_check()
+    """
     
-    sp_f = 40.0
-    sp_r = 20.0
-    len = 1.0
-    wid = 1.0
-
-    rectangle(robot, sp_f, sp_r, len, wid)  
-
+        
+        sp_f = 40.0
+        sp_r = 20.0
+        len = 1.0
+        wid = 1.0
+    
+        rectangle(robot, sp_f, sp_r, len, wid)  
+    
+    """
+    
 
 
     """

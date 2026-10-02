@@ -1,4 +1,4 @@
-from hambot_lab.control.MyRobot import MyRobot
+from control.MyRobot import MyRobot
 import time
 
 TIME = 0.5
