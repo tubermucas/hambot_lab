@@ -44,7 +44,7 @@ class MyRobot(HamBot):
             traveled = cur_tetha - start_pos
 
             # Stop when the robot has traveled the requested distance
-            if traveled >= dist_rad - 0.7:
+            if traveled >= dist_rad - 1:
                 
                 self.stop_motors()
 
@@ -60,13 +60,13 @@ class MyRobot(HamBot):
 
         if angle > 0:
             # Empirical offset compensates for the robot's turning overshoot.
-            angle -= 22
+            angle -= 23
             left_speed = -speed
             right_speed = speed
 
             self.last_wheel = True
         else:
-            angle += 22
+            angle += 23
             left_speed = speed
             right_speed = -speed
 
@@ -129,7 +129,7 @@ class MyRobot(HamBot):
             prev_heading = current_heading
 
             # Stop when the robot has completed a full circle
-            if abs(total_rotation) >= 353:
+            if abs(total_rotation) >= 345:
                 self.stop_motors()
                 break
 

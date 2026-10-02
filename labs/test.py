@@ -1,56 +1,66 @@
-from hambot_lab.control.MyRobot import MyRobot
+from control.MyRobot import MyRobot
 import time
 
-TIME = 0.5
+TIME = 0.7
 
 def rectangle(robot, speed_for, speed_rot, length, width):
-    robot.move_forward(speed_for, round(length/2, 2))
-    print("reached the first corner")
+    """Trace a rectangle and finish at the starting position."""
+    # Start halfway along a long side so the final leg returns to the start.
+    robot.move_forward(speed_for, length/2)
+
     time.sleep(TIME)
 
     robot.rotate(speed_rot, -90)
     time.sleep(TIME)
 
     robot.move_forward(speed_for, width)
-    print("reached the second corner")
+
     time.sleep(TIME)
 
     robot.rotate(speed_rot, -90)
-    time.sleep(TIME/5)
+    time.sleep(TIME)
+
     robot.move_forward(speed_for, length)
-    print("reached the third corner")
     time.sleep(TIME)
 
     robot.rotate(speed_rot, -90)
     time.sleep(TIME)
+
     robot.move_forward(speed_for, width)
-    print("reached the forth corner")
     time.sleep(TIME)
 
     robot.rotate(speed_rot, -90)
     time.sleep(TIME)
     robot.move_forward(speed_for, length/2)
-    print("reached the initial position")
+
     time.sleep(TIME)
 
 def triangle(robot, speed_for, speed_rot, side):
+    """Trace an equilateral triangle with the supplied side length."""
     robot.move_forward(speed_for, side)
-    print("reached the first corner")
-    time.sleep(5e-9)
 
-    robot.rotate(speed_rot, 120)
-    robot.move_forward(speed_for, side)
-    print("reached the second corner")
+    time.sleep(TIME)
 
-    robot.rotate(speed_rot, 120)
+    robot.rotate(speed_rot, 115)
+    time.sleep(TIME)
+
     robot.move_forward(speed_for, side)
-    robot.rotate(speed_rot, 120)
-    print("reached the initial position")
+    time.sleep(TIME)
+
+    robot.rotate(speed_rot, 115)
+    time.sleep(TIME)
+
+    robot.move_forward(speed_for, side)
+    time.sleep(TIME)
+    
+    robot.rotate(speed_rot, 135)
+
+    time.sleep(TIME)
 
 
 def main():
     robot = MyRobot()
-    
+    """
     sp_f = 40.0
     sp_r = 20.0
     len = 1.0
@@ -58,7 +68,9 @@ def main():
 
     rectangle(robot, sp_f, sp_r, len, wid)  
 
-
+    """
+    
+    triangle(robot, 60, 30, 0.5)
 
     """
     testing of rotation
