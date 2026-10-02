@@ -8,11 +8,18 @@ class MyRobot(HamBot):
     AXLE_WIDTH = 0.205
 
     def __init__(self):
-        super().__init__(drivetrain=HamBot.DRIVE_2WD)
+        super().__init__(drivetrain=HamBot.DRIVE_2WD, lidar_enabled=True)
 
         # Keeping track the last turned wheel
         # True - left wheel, False - right wheel
         self.last_wheel = True
+
+
+
+    def lidar_check(self):
+        # Check the LIDAR data
+        lidar_data = self.get_lidar_readings()
+        return lidar_data
 
 
     def get_aver_encoders(self):
