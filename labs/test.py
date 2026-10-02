@@ -60,17 +60,21 @@ def triangle(robot, speed_for, speed_rot, side):
 
 def main():
     robot = MyRobot()
-    """
-    sp_f = 40.0
-    sp_r = 20.0
-    len = 1.0
-    wid = 1.0
 
-    rectangle(robot, sp_f, sp_r, len, wid)  
-
+    robot.lidar_check()
     """
     
-    triangle(robot, 60, 30, 0.5)
+        
+        sp_f = 40.0
+        sp_r = 20.0
+        len = 1.0
+        wid = 1.0
+    
+        rectangle(robot, sp_f, sp_r, len, wid)  
+    
+    """
+    
+
 
     """
     testing of rotation
