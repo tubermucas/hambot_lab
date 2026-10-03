@@ -4,10 +4,11 @@ import time
 
 # ============================================================
 # LAB 2 - PID CONTROL
-# STEPS 1 TO 4
+# STEPS 1 TO 9
 # ============================================================
 
-# The assignment requires a PID update time of 0.032 seconds.
+# The assignment requires a fixed PID update period
+# of 0.032 seconds.
 DT = 0.032
 
 
@@ -19,9 +20,15 @@ DT = 0.032
 # 2 ft = 609.6 mm
 LIDAR_TARGET_DISTANCE = 609.6
 
-# Encoder distance is calculated in meters.
+
+# Encoder distances are calculated in meters.
+
 # 1 ft = 0.3048 m
 ENCODER_TARGET_DISTANCE = 0.3048
+
+# Final Step:
+# 2 ft = 0.6096 m
+FINAL_ENCODER_TARGET_DISTANCE = 0.6096
 
 
 # ============================================================
@@ -40,7 +47,7 @@ LIDAR_TOLERANCE = 20.0
 ENCODER_TOLERANCE = 0.01
 
 # Rotation tolerance:
-# Robot can stop when it is within 2 degrees of the target.
+# 2 degrees
 ROTATION_TOLERANCE = 2.0
 
 
@@ -58,6 +65,7 @@ def get_front_distance(robot):
 
     lidar_data = robot.get_range_image()
 
+    # get_range_image() returns -1 if LiDAR is not enabled.
     if lidar_data == -1:
         raise RuntimeError("LiDAR is not enabled.")
 
@@ -68,12 +76,12 @@ def get_front_distance(robot):
 
 # ============================================================
 # LIDAR PID CONTROLLER
-# Used for STEP 1 and STEP 3
+# Used for STEP 1, STEP 3, STEP 5, and STEP 7
 # ============================================================
 
 def lidar_pid(robot, target_distance, kp, ki, kd):
     """
-    Move the robot until it reaches the requested distance
+    Move the robot until it reaches the desired distance
     from the wall using LiDAR feedback and PID control.
 
     target_distance:
@@ -108,8 +116,6 @@ def lidar_pid(robot, target_distance, kp, ki, kd):
         # ----------------------------------------------------
         # 2. CALCULATE ERROR
         # ----------------------------------------------------
-        #
-        # Lab definition:
         #
         # error = desired value - measured value
         #
@@ -165,14 +171,13 @@ def lidar_pid(robot, target_distance, kp, ki, kd):
         # 7. CONVERT PID OUTPUT TO MOTOR SPEED
         # ----------------------------------------------------
         #
-        # Example:
+        # error = target - current
         #
-        # target  = 609.6 mm
-        # current = 1500 mm
+        # If the robot is too far from the wall:
         #
-        # error = negative
+        # error < 0
         #
-        # But positive motor speed means forward.
+        # Positive motor speed means forward.
         #
         # Therefore the PID output sign is reversed.
 
@@ -252,13 +257,13 @@ def get_traveled_distance(robot):
     """
     Calculate the distance traveled using the wheel encoders.
 
-    Encoder values are wheel rotations in radians.
+    The encoders return wheel rotation in radians.
 
-    Linear distance:
+    Linear distance is calculated with:
 
         distance = angle_in_radians * wheel_radius
 
-    The distances from the left and right wheels are averaged.
+    The left and right wheel distances are averaged.
 
     Returns:
         Distance traveled in meters.
@@ -275,7 +280,7 @@ def get_traveled_distance(robot):
     right_distance = right_radians * robot.WHEEL_RADIUS
 
 
-    # Average both wheels.
+    # Average both wheel distances.
     traveled_distance = (
         left_distance + right_distance
     ) / 2.0
@@ -286,7 +291,7 @@ def get_traveled_distance(robot):
 
 # ============================================================
 # ENCODER PID CONTROLLER
-# Used for STEP 2
+# Used for STEP 2, STEP 6, and STEP 9
 # ============================================================
 
 def encoder_pid(robot, target_distance, kp, ki, kd):
@@ -307,7 +312,8 @@ def encoder_pid(robot, target_distance, kp, ki, kd):
         Derivative gain.
     """
 
-    # Reset the encoders so this movement starts from zero.
+    # Reset encoder accumulators so every new movement
+    # starts from zero.
     robot.reset_encoders()
 
 
@@ -330,13 +336,6 @@ def encoder_pid(robot, target_distance, kp, ki, kd):
         # ----------------------------------------------------
         #
         # error = desired distance - traveled distance
-        #
-        # Example:
-        #
-        # target  = 0.3048 m
-        # current = 0.1000 m
-        #
-        # error = 0.2048 m
 
         error = target_distance - current_distance
 
@@ -384,11 +383,15 @@ def encoder_pid(robot, target_distance, kp, ki, kd):
         # 7. MOTOR SPEED
         # ----------------------------------------------------
         #
-        # Here the error starts positive.
+        # At the beginning:
         #
-        # Positive motor speed = forward.
+        # target > current
         #
-        # Therefore the PID output can be used directly.
+        # Therefore:
+        #
+        # error > 0
+        #
+        # Positive motor speed means forward.
 
         motor_speed = pid_output
 
@@ -455,7 +458,7 @@ def encoder_pid(robot, target_distance, kp, ki, kd):
 
 # ============================================================
 # IMU PID CONTROLLER
-# Used for STEP 4
+# Used for STEP 4 and STEP 8
 # ============================================================
 
 def rotation_pid(robot, target_rotation, kp, ki, kd):
@@ -468,9 +471,6 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
 
         Positive = counterclockwise
         Negative = clockwise
-
-    Example:
-        -180 degrees = 180 degrees clockwise
     """
 
     # PID variables.
@@ -478,11 +478,11 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
     previous_error = None
 
 
-    # Heading before the rotation begins.
+    # Read heading before rotation begins.
     previous_heading = robot.get_heading()
 
 
-    # Total amount the robot has rotated.
+    # Total rotation completed during this movement.
     total_rotation = 0.0
 
 
@@ -499,17 +499,11 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
         # 2. CALCULATE CHANGE IN HEADING
         # ----------------------------------------------------
         #
-        # Heading is between 0 and 360 degrees.
+        # get_heading() returns values between
+        # 0 and 360 degrees.
         #
-        # This formula handles the transition between
-        # 359 degrees and 0 degrees correctly.
-        #
-        # Example:
-        #
-        # previous = 359 degrees
-        # current  = 1 degree
-        #
-        # actual change = +2 degrees
+        # This formula correctly handles crossing
+        # between 359 degrees and 0 degrees.
 
         delta_heading = (
             current_heading
@@ -518,7 +512,7 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
         ) % 360 - 180
 
 
-        # Add this small movement to the total rotation.
+        # Add the small heading change to total rotation.
         total_rotation += delta_heading
 
 
@@ -527,16 +521,6 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
         # ----------------------------------------------------
         #
         # error = desired rotation - completed rotation
-        #
-        # STEP 4:
-        #
-        # target = -180 degrees
-        #
-        # Initially:
-        #
-        # total_rotation = 0
-        #
-        # error = -180 degrees
 
         error = target_rotation - total_rotation
 
@@ -621,21 +605,10 @@ def rotation_pid(robot, target_rotation, kp, ki, kd):
         # 11. ROTATE ROBOT IN PLACE
         # ----------------------------------------------------
         #
-        # The wheels move in opposite directions.
+        # Wheels move in opposite directions.
         #
-        # Positive rotation_speed:
-        #
-        #     left  = negative
-        #     right = positive
-        #
-        #     -> counterclockwise
-        #
-        # Negative rotation_speed:
-        #
-        #     left  = positive
-        #     right = negative
-        #
-        #     -> clockwise
+        # Negative target -> clockwise
+        # Positive target -> counterclockwise
 
         robot.run_motors(
             -rotation_speed,
@@ -671,26 +644,34 @@ def main():
     # PID GAINS
     # ========================================================
     #
-    # These are starting values only.
-    # They must be tuned experimentally on the physical robot.
+    # These are STARTING VALUES.
+    #
+    # The final gains must be tuned experimentally on
+    # the physical robot.
 
 
-    # LiDAR PID gains.
-    # LiDAR error is measured in millimeters.
+    # --------------------------------------------------------
+    # LiDAR PID gains
+    # --------------------------------------------------------
+
     lidar_kp = 0.05
     lidar_ki = 0.0
     lidar_kd = 0.0
 
 
-    # Encoder PID gains.
-    # Encoder error is measured in meters.
+    # --------------------------------------------------------
+    # Encoder PID gains
+    # --------------------------------------------------------
+
     encoder_kp = 150.0
     encoder_ki = 0.0
     encoder_kd = 0.0
 
 
-    # IMU PID gains.
-    # Rotation error is measured in degrees.
+    # --------------------------------------------------------
+    # IMU PID gains
+    # --------------------------------------------------------
+
     imu_kp = 0.30
     imu_ki = 0.0
     imu_kd = 0.0
@@ -770,16 +751,117 @@ def main():
         time.sleep(1)
 
 
+        # ====================================================
+        # STEP 5
+        # LiDAR PID - Stop 2 ft from the wall
+        # ====================================================
+
+        print("\nStarting Step 5 - LiDAR PID")
+
+        lidar_pid(
+            robot=robot,
+            target_distance=LIDAR_TARGET_DISTANCE,
+            kp=lidar_kp,
+            ki=lidar_ki,
+            kd=lidar_kd
+        )
+
+        time.sleep(1)
+
+
+        # ====================================================
+        # STEP 6
+        # Encoder PID - Drive forward 1 ft
+        # ====================================================
+
+        print("\nStarting Step 6 - Encoder PID")
+
+        encoder_pid(
+            robot=robot,
+            target_distance=ENCODER_TARGET_DISTANCE,
+            kp=encoder_kp,
+            ki=encoder_ki,
+            kd=encoder_kd
+        )
+
+        time.sleep(1)
+
+
+        # ====================================================
+        # STEP 7
+        # LiDAR PID - Back up until 2 ft from the wall
+        # ====================================================
+
+        print("\nStarting Step 7 - LiDAR PID Backup")
+
+        lidar_pid(
+            robot=robot,
+            target_distance=LIDAR_TARGET_DISTANCE,
+            kp=lidar_kp,
+            ki=lidar_ki,
+            kd=lidar_kd
+        )
+
+        time.sleep(1)
+
+
+        # ====================================================
+        # STEP 8
+        # IMU PID - Rotate 180 degrees counterclockwise
+        # ====================================================
+
+        print("\nStarting Step 8 - IMU PID Counterclockwise Rotation")
+
+        rotation_pid(
+            robot=robot,
+            target_rotation=180.0,
+            kp=imu_kp,
+            ki=imu_ki,
+            kd=imu_kd
+        )
+
+        time.sleep(1)
+
+
+        # ====================================================
+        # STEP 9
+        # Encoder PID - Final forward drive of 2 ft
+        # ====================================================
+        #
+        # Step 9 uses the same encoder PID controller.
+        #
+        # The difference is the requested distance:
+        #
+        # Steps 2 and 6:
+        #     1 ft = 0.3048 m
+        #
+        # Step 9:
+        #     2 ft = 0.6096 m
+
+        print("\nStarting Step 9 - Final Encoder PID")
+
+        encoder_pid(
+            robot=robot,
+            target_distance=FINAL_ENCODER_TARGET_DISTANCE,
+            kp=encoder_kp,
+            ki=encoder_ki,
+            kd=encoder_kd
+        )
+
+        # Keep the robot stopped briefly at the final position.
+        time.sleep(1)
+
+
     finally:
 
         # ====================================================
-        # SAFETY
+        # SAFETY / CLEAN SHUTDOWN
         # ====================================================
         #
-        # Always stop the motors if the program finishes
-        # or if an error occurs.
+        # disconnect_robot() stops the motors and shuts down
+        # the robot sensors/background threads safely.
 
-        robot.stop_motors()
+        robot.disconnect_robot()
 
 
 if __name__ == "__main__":
