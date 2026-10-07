@@ -60,8 +60,11 @@ def triangle(robot, speed_for, speed_rot, side):
 
 def main():
     robot = MyRobot()
+    print("testing")
 
-    robot.lidar_check()
+    time.sleep(5)
+    
+    print(robot.lidar_check())
     """
     
         

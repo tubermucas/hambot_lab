@@ -7,6 +7,21 @@ class MyRobot(HamBot):
     WHEEL_RADIUS=0.045
     AXLE_WIDTH = 0.205
 
+    # The lab requires a fixed PID update period of 0.032 seconds.
+    DT = 0.032
+
+    # Maximum motor command allowed during the PID controllers.
+    MAX_SPEED = 60
+
+    # LiDAR tolerance:
+    # 20 mm = 2 cm.
+    LIDAR_TOLERANCE = 20.0
+
+    # Encoder tolerance:
+    # 0.01 m = 1 cm.
+    ENCODER_TOLERANCE = 0.01
+
+
     def __init__(self):
         super().__init__(drivetrain=HamBot.DRIVE_2WD, lidar_enabled=True)
 
@@ -16,10 +31,10 @@ class MyRobot(HamBot):
 
 
 
-    def lidar_check(self):
-        # Check the LIDAR data
-        lidar_data = self.get_lidar_readings()
-        return lidar_data
+    def get_front_distance(self):
+        
+        lidar_data = self.get_range_image()
+        return lidar_data[180]
 
 
     def get_aver_encoders(self):
@@ -35,6 +50,86 @@ class MyRobot(HamBot):
         else:
             self.set_right_motor_speed(right_speed)
             self.set_left_motor_speed(left_speed)
+
+
+    def lidar_pid(self, target_distance, kp, ki, kd):
+        integral = 0
+        prev_error = None
+
+        while True:
+            cur_dist = self.get_front_distance()
+            error = target_distance - cur_dist
+
+            proportional = kp * error
+
+            integral += error * self.DT
+            integral_term = ki * integral
+
+            if prev_error is not None:
+                derivative = (error - prev_error) / self.DT
+            else:
+                derivative = 0.0
+            derivative_term = kd * derivative
+
+            output = proportional + integral_term + derivative_term
+
+            motor_speed = -output
+            motor_speed = max(-self.MAX_SPEED, min(self.MAX_SPEED, motor_speed))
+
+            if abs(error) <= self.LIDAR_TOLERANCE:
+
+                self.stop_motors()
+                break
+
+            self.run_motors(motor_speed, motor_speed)
+
+            prev_error = error
+
+            time.sleep(self.DT)
+
+
+    def encoder_pid(self, target_dist, direction, kp, ki, kd):
+
+        start_pos = self.get_aver_encoders()
+        integral = 0.0
+        prev_error = None
+        
+        # Convert the distance to radians
+        dist_rad = round(target_dist / self.WHEEL_RADIUS, 4)
+
+        while True:
+            cur_tetha = self.get_aver_encoders()
+            traveled = cur_tetha - start_pos
+
+            error = dist_rad - traveled
+
+            proportional = kp * error
+
+            integral += error * self.DT
+            integral_term = ki * integral
+
+            if prev_error is not None:
+                derivative = (error - prev_error) / self.DT
+            else:
+                derivative = 0.0
+
+            derivative_term = kd * derivative
+
+            output = proportional + integral_term + derivative_term
+
+            motor_speed = output * direction
+            motor_speed = max(-self.MAX_SPEED, min(self.MAX_SPEED, motor_speed))
+
+            if abs(error) <= self.ENCODER_TOLERANCE:
+                self.stop_motors()
+                break
+
+            self.run_motors(motor_speed, motor_speed)
+
+            prev_error = error
+
+            time.sleep(self.DT)
+
 
     def move_forward(self, speed, dist):
         """Drive forward for ``dist`` metres."""
