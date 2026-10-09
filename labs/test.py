@@ -3,161 +3,51 @@ import time
 
 TIME = 0.7
 
-def rectangle(robot, speed_for, speed_rot, length, width):
-    """Trace a rectangle and finish at the starting position."""
-    # Start halfway along a long side so the final leg returns to the start.
-    robot.move_forward(speed_for, length/2)
-
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, -90)
-    time.sleep(TIME)
-
-    robot.move_forward(speed_for, width)
-
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, -90)
-    time.sleep(TIME)
-
-    robot.move_forward(speed_for, length)
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, -90)
-    time.sleep(TIME)
-
-    robot.move_forward(speed_for, width)
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, -90)
-    time.sleep(TIME)
-    robot.move_forward(speed_for, length/2)
-
-    time.sleep(TIME)
-
-def triangle(robot, speed_for, speed_rot, side):
-    """Trace an equilateral triangle with the supplied side length."""
-    robot.move_forward(speed_for, side)
-
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, 115)
-    time.sleep(TIME)
-
-    robot.move_forward(speed_for, side)
-    time.sleep(TIME)
-
-    robot.rotate(speed_rot, 115)
-    time.sleep(TIME)
-
-    robot.move_forward(speed_for, side)
-    time.sleep(TIME)
-    
-    robot.rotate(speed_rot, 135)
-
-    time.sleep(TIME)
-
-
 def main():
     robot = MyRobot()
     print("testing")
 
-    time.sleep(5)
+    """
+    #so far: kp = 35, ki = 4.5, kd = 6 for forward 
+    kp = float(input("Enter kp: "))
+    ki = float(input("Enter ki: "))
+    kd = float(input("Enter kd: "))
+
+    dis = float(input("Enter distance: "))
     
-    print(robot.lidar_check())
+    robot.lidar_pid(dis, kp, ki, kd)
+    print(robot.get_front_distance())
+    print("done")
+
     """
     
-        
-        sp_f = 40.0
-        sp_r = 20.0
-        len = 1.0
-        wid = 1.0
-    
-        rectangle(robot, sp_f, sp_r, len, wid)  
-    
-    """
-    
-
 
     """
-    testing of rotation
-    optimal speed for the rotating in place with no movements before or after: 10 rpm
+    # so far: kp = 6, ki = 0.2, kd = 0.4 for forward
+    kp = float(input("Enter kp: "))
+    ki = float(input("Enter ki: "))
+    kd = float(input("Enter kd: "))
 
-    while True:
+    dis = float(input("Enter distance: "))
+    direct = 1 
 
-        speed = float(input("enter speed: "))
-        rotation = float(input("enter the degree: "))
-
-        motion.rotate(speed, rotation)    
-    
+    robot.encoder_pid(dis, kp, ki, kd)
+    print("done")
     """
-    """
-    
-    # speed which is good rn is 21 rpm
-    speed = float(input("enter spead: "))
-    dis = float(input("enter distance: "))
-    speed_rot = float(input("enter rotation speed: "))
-    degree = float(input("enter degree: "))
 
+    # so far: kp = 0.7, ki = 0.02, kd = 0.05 for rotation
+    kp = float(input("Enter kp: "))
+    ki = float(input("Enter ki: "))
+    kd = float(input("Enter kd: "))
+    angle = float(input("Enter angle: "))
 
-    print(f"move to {dis} at {speed}")
-    robot.move_forward(speed, dis)
+    #robot.move_forward(45, 0.3)
 
-    time.sleep(1)
+    robot.compass_pid(angle, kp, ki, kd)
 
-    print("rotating")
-    robot.rotate(speed_rot, degree)
-
-
-    time.sleep(1)
-
-    print(f"move to {dis} at {speed}")
-    robot.move_forward(speed, dis)
-    """
-    
-    """
-    test for move_forward function
-    the most optimal speed is 17-18
-
-    while True: 
-        speed = float(input("enter speed: "))
-        distance = float(input("enter distance: "))
-
-        motion.move_forward(speed, distance)
-
-    """
+    #robot.move_forward(45, 0.3)
+    print("done")
 
     
-    
-    """
-    forward_sp = int(input("Enter speed: "))
-    #rotate_sp = int(input("Enter rot speed: "))
-    second_rad = float(input("Enter radius ICC: "))
-    angular_sp = int(input("Enter angular speed: "))
-
-    #side_tri = 1
-
-    print("Start the second circle")
-    print("-" * 20)
-    robot.drive_circle(radius=second_rad, angular_speed=-angular_sp)
-    print("-" * 20 + "\n")
-
-    time.sleep(2) 
-
-    print("First forward")
-    print("-" * 20)
-    robot.move_forward(forward_sp, 0.5)
-    print("-" * 20 + "\n") 
-
-    time.sleep(1)
-
-    print("Second forward")
-    print("-" * 20)
-    robot.move_forward(forward_sp, 0.5)
-    print("-" * 20 + "\n") 
-
-    """
-
-
 if __name__ == "__main__":
     main()
