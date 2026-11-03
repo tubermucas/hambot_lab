@@ -1,59 +1,48 @@
 from robot_systems.robot import HamBot
 from robot_systems.camera import Camera
-import time
 
+import time
+import math 
 
 class MyRobot(HamBot):
     # Physical dimensions
     WHEEL_RADIUS=0.045
     AXLE_WIDTH = 0.205
     DT = 0.1
-    MAX_SPEED = 60
+    MAX_SPEED = 30 # was 60
     MIN_SPEED = 10
     ROTATE_MAX_SP = 30
     ROTATE_MIN_SP = 5
     LIDAR_TOLERANCE = 0.025
     ENCODER_TOLERANCE = 0.3
     ANGLE_TOLERANCE = 2.0
-    IMAGE_TOLERANCE = 0.025 # Adjust the tolerance, since it is in pixels. 
+    IMAGE_TOLERANCE = 0.05 # Adjust the tolerance, since it is in pixels. 
     DEPTH_MATCH_TOLERANCE = 0.5 # Adjust the tolerance for depth matching.
+    WALL_LOST = 0.4 # was 0.35 and 0.3
+    FRONT_CLEARANCE = 0.3
 
 
     def __init__(self):
-        super().__init__(drivetrain=HamBot.DRIVE_2WD, lidar_enabled=True, camera_enabled=True, camera_type=Camera.CAM_OAKD)
+        super().__init__(drivetrain=HamBot.DRIVE_2WD, lidar_enabled=True, camera_enabled=True, camera_type=Camera.CAM_PICAM)
 
         if self.camera is None:
+            self.disconnect_robot()
             raise RuntimeError("Camera not initialized.")
         
         self.camera.set_target_colors(
-            (30, 220, 220),       # OpenCV HSV: approximate yellow
-            hue_tolerance=10,
+            (80, 220, 220),
+            hue_tolerance=15,
             min_saturation=100,
             min_value=60,
         )
 
-        # Keeping track the last turned wheel
-        # True - left wheel, False - right wheel
-        #self.last_wheel = True
+        self.forward_motion = True
 
     """
     ---- Helper functions ----
     """
 
-    # Run motors with the given speeds for left and right wheels
     def run_motors(self, left_speed, right_speed):
-        
-
-        """
-        # Run motors according to the last turned wheel
-        if self.last_wheel:
-            self.set_left_motor_speed(left_speed)
-            self.set_right_motor_speed(right_speed)
-        else:
-            self.set_right_motor_speed(right_speed)
-            self.set_left_motor_speed(left_speed)
-
-        """
 
         self.set_right_motor_speed(right_speed)
         self.set_left_motor_speed(left_speed)
@@ -75,16 +64,12 @@ class MyRobot(HamBot):
         raise RuntimeError("LiDAR reading timed out.")
     
     # Saturate the speed to be within the allowed range
-    def saturation(self, speed, rotate=False):
+    def saturation(self, speed, cap=MAX_SPEED, rotate=False):
         if not rotate:
-            if speed > self.MAX_SPEED:
-                return self.MAX_SPEED
-            elif speed < -self.MAX_SPEED:
-                return -self.MAX_SPEED
-            elif 0 < speed < self.MIN_SPEED:
-                return self.MIN_SPEED
-            elif -self.MIN_SPEED < speed < 0:
-                return -self.MIN_SPEED
+            if speed > cap:
+                return cap
+            elif speed < -cap:
+                return -cap
             else:
                 return speed
         else:
@@ -133,6 +118,11 @@ class MyRobot(HamBot):
     """
     ---- Bug Zero Algorithm functions ----
     """
+    def check_landmarks(self):
+        landmarks = self.camera.find_landmarks()
+        if not landmarks:
+            return False
+        return True
 
     # Move towards the goal using PID control 
     def move_to_goal(self, kp_fw, ki_fw, kd_fw, kp_st, ki_st, kd_st):
@@ -141,184 +131,208 @@ class MyRobot(HamBot):
         prev_front_error = None 
         prev_steering_error = None
         target_distance = 0.25
-
+        image_width = self.get_width()
+        
         while True:
 
             landmarks = self.camera.find_landmarks()
 
-            cur_dist = self.get_front_distance()
+            scan = self.get_range_image()
+
+            front_values = [d for d in scan[170:190] if math.isfinite(d) and d > 0]
+
+            cur_dist = min(front_values) / 1000.0 if front_values else None
 
             if len(landmarks) > 0:
 
                 # Compute the front movement PID output 
-                front_error = target_distance - cur_dist
+                front_error = cur_dist - target_distance
 
                 forward_speed, front_integral, prev_front_error = self.compute_pid(kp_fw, ki_fw, kd_fw, front_integral, front_error, prev_front_error)
-                forward_speed = -forward_speed  # Invert the speed to move forward
 
                 # Compute the steering PID output
                 goal = landmarks[0]
                 goal_x = goal.x
-                goal_depth = goal.depth / 1000.0 # meters
 
-                midpoint = self.get_width() / 2
+                midpoint = image_width / 2
 
                 steering_error = goal_x - midpoint
 
                 steering_output, steering_integral, prev_steering_error = self.compute_pid(kp_st, ki_st, kd_st, steering_integral, steering_error, prev_steering_error)
 
-                """
-                Checking though AI says this part is not needed, but lets keep it for now.
-                if steering_error < 0: 
-                    left_speed = self.saturation(forward_speed - steering_output)
-                    right_speed = self.saturation(forward_speed + steering_output)
-                elif steering_error > 0:
-                    left_speed = self.saturation(forward_speed + steering_output)
-                    right_speed = self.saturation(forward_speed - steering_output)
-                else: 
-                    left_speed = self.saturation(forward_speed)
-                    right_speed = self.saturation(forward_speed)
-                """
+                turn = -steering_output
+                left_speed = forward_speed + turn
+                right_speed = forward_speed - turn
 
-                # Saturate the calcualated outputs
-                left_speed = self.saturation(forward_speed + steering_output)
-                right_speed = self.saturation(forward_speed - steering_output)
+                peak_speed = max(abs(left_speed), abs(right_speed))
+                if peak_speed > self.MAX_SPEED:
+                    scale = self.MAX_SPEED / peak_speed
+                    left_speed *= scale
+                    right_speed *= scale
 
-                # Adjust Hyperparameter
-                goal_centered = abs(steering_error) <= self.IMAGE_TOLERANCE 
 
-                front_return_matches_goal = (
-                    goal_centered and abs(goal_depth - cur_dist) <= self.DEPTH_MATCH_TOLERANCE
+                print(f"steering_error: {steering_error}, front_error: {front_error}, left_speed: {left_speed}, right_speed: {right_speed}")
+               
+                # Check if the robot has reached the goal
+                if abs(steering_error) <= self.IMAGE_TOLERANCE * image_width and abs(front_error) <= self.LIDAR_TOLERANCE:
+                    self.stop_motors()
+                    return True
+                
+
+            else:
+                # If no landmarks are detected, stop the robot
+                self.stop_motors()
+                print("No landmarks detected: stopping motors.")
+                return False
+
+            self.run_motors(left_speed, right_speed)
+
+            time.sleep(self.DT)
+
+    def follow_wall(self, safe_distance, wall_type,
+                    kp_fw, ki_fw, kd_fw, kp_st, ki_st, kd_st):
+
+        if wall_type not in ("left", "right"):
+            raise ValueError("wall_type must be 'left' or 'right'")
+
+        target_distance = 0.15
+
+        front_integral = steering_integral = 0.0
+        prev_front_error = prev_steering_error = None
+
+        angle_gain = 15.0  # Starting value; motor-command units per radian.
+
+        def sector_median(center):
+            values = sorted(
+                d / 1000.0
+                for d in scan[center - 3:center + 4]
+                if math.isfinite(d) and d > 0
+            )
+            return values[len(values) // 2] if len(values) >= 3 else None
+
+        try:
+            while True:
+                scan = self.get_range_image()
+
+                front_values = [d for d in scan[170:190] if math.isfinite(d) and d > 0]
+
+                if not front_values:
+                    self.stop_motors()
+                    front_integral = steering_integral = 0.0
+                    prev_front_error = prev_steering_error = None
+                    time.sleep(self.DT)
+                    continue
+
+                front_distance = min(front_values) / 1000.0
+
+                if self.forward_motion:
+                    self.forward_motion = False
+                    self.lidar_pid(target_distance * 2, 40, 4, 6)
+
+
+                if front_distance < self.FRONT_CLEARANCE:
+                    angle = -60 if wall_type == "left" else 60
+                    self.compass_pid(angle, 0.7, 0.02, 0.05)
+                    
+
+                    front_integral = steering_integral = 0.0
+                    prev_front_error = prev_steering_error = None
+                    continue
+
+                start, stop = (
+                    (80, 140) if wall_type == "left" else (220, 280)
                 )
 
-                # Check if the robot has reached the goal
-                if front_return_matches_goal and abs(front_error) <= self.LIDAR_TOLERANCE:
+                wall_values = [d for d in scan[start:stop] if math.isfinite(d) and d > 0]
+                if not wall_values:
+                    self.stop_motors()
+                    front_integral = steering_integral = 0.0
+                    prev_front_error = prev_steering_error = None
+                    time.sleep(self.DT)
+                    continue
+                
+                wall_distance = min(wall_values) / 1000.0
+
+
+                # Forward PID, capped independently of steering.
+                front_error = front_distance - target_distance
+                forward, front_integral, prev_front_error = self.compute_pid(
+                    kp_fw, ki_fw, kd_fw,
+                    front_integral, front_error, prev_front_error
+                )
+
+                forward = self.saturation(forward, 20)
+
+                # Side-distance steering PID.
+                steering_error = wall_distance - safe_distance
+                steering, steering_integral, prev_steering_error = (
+                    self.compute_pid(
+                        kp_st, ki_st, kd_st,
+                        steering_integral, steering_error, prev_steering_error
+                    )
+                )
+
+
+                # Estimate alignment using side and front-side measurements.
+                side_center = 90 if wall_type == "left" else 270
+                diagonal_center = 120 if wall_type == "left" else 240
+
+                side = sector_median(side_center)
+                diagonal = sector_median(diagonal_center)
+
+                wall_angle = None
+
+                if side is not None and diagonal is not None:
+                    # Mirror the geometry for right-wall following:
+                    # x = forward distance; y = distance toward the selected side.
+                    x = diagonal * math.sin(math.radians(30))
+                    y = diagonal * math.cos(math.radians(30))
+
+                    candidate_angle = math.atan2(y - side, x)
+
+                    # Basic plausibility gates. These do NOT prove both readings
+                    # belong to the same wall.
+                    if (
+                        side < safe_distance + 0.20
+                        and abs(candidate_angle) <= math.radians(35)
+                    ):
+                        wall_angle = candidate_angle
+                        steering += angle_gain * wall_angle
+
+                steering = self.saturation(steering)
+                # Diagnostic constraint for normal wall following.
+                forward = max(0.0, forward)
+                steering_limit = 0.7 * forward
+                steering = max(-steering_limit, min(steering, steering_limit))
+
+                turn = steering if wall_type == "left" else -steering
+
+                left_speed = forward - turn
+                right_speed = forward + turn
+
+                scale = max(1.0, abs(left_speed) / self.MAX_SPEED,
+                                abs(right_speed) / self.MAX_SPEED)
+                
+                left_speed /= scale
+                right_speed /= scale
+
+                # True assumes the cylinder's full width is visible, without occlusion.
+                if self.check_landmarks():
                     self.stop_motors()
                     return True
 
-                # If the object before the goal, stop the robot and return False
-                if abs(front_error) <= self.LIDAR_TOLERANCE and not front_return_matches_goal:
-                    self.stop_motors()
-                    return False
-                
-            else:
-                # If no landmarks and an object is nearby, return False
-                if cur_dist < target_distance:
-                    return False
-                
-                # If no landmarks and no object nearby, rotate in place to search for the goal
-                else:
-                    left_speed = 20
-                    right_speed = -20
+                print(
+                    f"front={front_distance:.3f}, wall={wall_distance:.3f}, "
+                    f"forward={forward:.2f}, steering={steering:.2f}, "
+                    f"left={left_speed:.2f}, right={right_speed:.2f}"
+                )
 
-            self.run_motors(left_speed, right_speed)
+                self.run_motors(left_speed, right_speed)
+                time.sleep(self.DT)
 
-            time.sleep(self.DT)
+        finally:
+            self.stop_motors()
 
-    # Follow the wall using PID control
-    def follow_wall(self, safe_distance, wall_type, kp_fw, ki_fw, kd_fw, kp_st, ki_st, kd_st):
-        front_integral = 0
-        steering_integral = 0
-        prev_front_error = None
-        prev_steering_error = None
-        target_distance = 0.25
-
-        while True: 
-
-            # Compute the front movement PID output
-            cur_dist = self.get_front_distance()
-            
-            front_error = target_distance - cur_dist
-
-            forward_speed, front_integral, prev_front_error = self.compute_pid(kp_fw, ki_fw, kd_fw, front_integral, front_error, prev_front_error)
-            forward_speed = -forward_speed  # Invert the speed to move forward
-
-            # Compute the steering PID output based on the wall type
-            if wall_type == "left":
-
-                # Compute the steering error based on the left wall distance
-                left_distance = min(self.get_range_image()[80:160]) / 1000.0
-                steering_error = left_distance - safe_distance
-
-                steering_output, steering_integral, prev_steering_error = self.compute_pid(kp_st, ki_st, kd_st, steering_integral, steering_error, prev_steering_error)
-
-                """
-                Checking though AI says this part is not needed, but lets keep it for now.
-                steering_output = abs(steering_output)
-
-                if steering_error < 0: 
-                    left_speed = self.saturation(forward_speed+steering_output)
-                    right_speed = self.saturation(forward_speed-steering_output)
-                elif steering_error > 0:
-                    left_speed = self.saturation(forward_speed-steering_output)
-                    right_speed = self.saturation(forward_speed+steering_output)
-                else:
-                    left_speed = self.saturation(forward_speed)
-                    right_speed = self.saturation(forward_speed)
-
-                """
-                # Saturate the calcualated outputs
-                left_speed = self.saturation(forward_speed - steering_output)
-                right_speed = self.saturation(forward_speed + steering_output)
-
-                # If the robot is too close to the wall, turn away from it
-                if cur_dist < 0.55: # Hyper parameter
-                    self.compass_pid(-90, 0.7, 0.02, 0.05) # Applied pid numbers from lab 2 
-
-                    front_integral = steering_integral = 0.0
-                    prev_front_error = prev_steering_error = None
-
-                    continue
-                    
-            elif wall_type == "right":
-
-                # Compute the steering error based on the right wall distance
-                right_distance = min(self.get_range_image()[200:280]) / 1000.0
-                steering_error = right_distance - safe_distance
-
-                steering_output, steering_integral, prev_steering_error = self.compute_pid(kp_st, ki_st, kd_st, steering_integral, steering_error, prev_steering_error)
-               
-
-                """
-                Checking though AI says this part is not needed, but lets keep it for now.
-                steering_output = abs(steering_output)
-                if steering_error < 0: 
-                    left_speed = self.saturation(forward_speed-steering_output)
-                    right_speed = self.saturation(forward_speed+steering_output)
-                elif steering_error > 0:
-                    left_speed = self.saturation(forward_speed+steering_output)
-                    right_speed = self.saturation(forward_speed-steering_output)
-                else:
-                    left_speed = self.saturation(forward_speed)
-                    right_speed = self.saturation(forward_speed)
-
-                """
-
-                # Saturate the calcualated outputs
-                left_speed = self.saturation(forward_speed + steering_output)
-                right_speed = self.saturation(forward_speed - steering_output)
-
-                # If the robot is too close to the wall, turn away from it
-                if cur_dist < 0.55: # Hyper parameter
-                    # Applied pid numbers from lab 2 
-                    self.compass_pid(90, 0.7, 0.02, 0.05) # Adjust the turning angle
-
-                    front_integral = steering_integral = 0.0
-                    prev_front_error = prev_steering_error = None
-
-                    continue
-
-            else:
-                print("Invalid wall type. Use 'left' or 'right'.")
-                return
-            
-            # Check if the goal is detected while following the wall
-            if self.camera.find_landmarks():
-                return True
-
-            self.run_motors(left_speed, right_speed)
-
-            time.sleep(self.DT)
 
     # Bug Zero algorithm that combines moving to the goal and following the wall
     def bug_zero(self, safe_distance, wall_type, pid_mtg_params, pid_wf_params):
@@ -495,6 +509,11 @@ class MyRobot(HamBot):
                 f"P={proportional:.2f}, I={integral_term:.2f}, "
                 f"D={derivative_term:.2f}, l_speed={left_speed:.2f}, r_speed={right_speed:.2f}"
             )
+
+            # True assumes the cylinder's full width is visible, without occlusion.
+            if self.check_landmarks():
+                self.stop_motors()
+                return True
 
             if abs(error) <= self.ANGLE_TOLERANCE:
                 self.stop_motors()
