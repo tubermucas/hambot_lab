@@ -1,1 +1,439 @@
+# Lab 4 Task 1
+# From the directory containing this file, copy it to the HamBot.
+#   scp task1_lab4_remise.py hambot@ROBOT_HOST:lab4/
+# Replace ROBOT_HOST with the HamBot hostname or IP address.
+#
+# On the HamBot, run localization. The robot pivots in place.
+#   cd ~/lab4 && /home/hambot/HamBot/hambot_venv/bin/python task1_lab4_remise.py --localize --hues 30 0 80 110 --aim-x 180 214 213 210 --radius-m 0.04 --pixels-per-degree 30
+# Add --trace to print measurement decisions and save one annotated photo per accepted landmark.
+#
+# Optional stationary sensor check on the HamBot:
+#   cd ~/lab4 && /home/hambot/HamBot/hambot_venv/bin/python task1_lab4_remise.py --diagnose --hue 80
+# Example hues in yellow, red, green, blue order: 30, 0, 80, 110.
+# See diagnose() on line 115 and save_trace_photo() on line 184.
+#
+# To copy a photo back, use the exact filename printed after "Saved trace photo".
+#   scp hambot@ROBOT_HOST:lab4/trace_green_EXAMPLE.jpg .
+
+"""Localize the physical HamBot using three colored landmarks."""
+
+import argparse
+import math
+from statistics import median
+import time
+
+
+# Each physical cell is 2 feet wide. Use meters throughout the calculations.
+CELL_SIZE_M = 0.6096
+# Use the four rows and four columns shown inside the physical maze in Figure 5b.
+GRID_SIZE = 4
+# The origin is at the grid center. Divide the full width by two to find each edge.
+HALF_WIDTH_M = GRID_SIZE * CELL_SIZE_M / 2
+
+# Each color is a dictionary key for its known cone center (x, y) in meters.
+# Positive x points east and positive y points north. These values assume the
+# cone centers sit exactly on the corners. Use measured coordinates if they differ.
+LANDMARKS = {
+    "yellow": (-HALF_WIDTH_M, HALF_WIDTH_M),
+    "red": (HALF_WIDTH_M, HALF_WIDTH_M),
+    "green": (-HALF_WIDTH_M, -HALF_WIDTH_M),
+    "blue": (HALF_WIDTH_M, -HALF_WIDTH_M),
+}
+
+
+# Professor's trilateration method (LocalizationLandmarks, slides 6-8).
+# Each circle uses the known landmark center and the measured range as its radius.
+# Subtracting the two equations cancels the squared robot coordinates.
+def circle_difference(first, second):
+    """Subtract two circle equations to get a line: a*x + b*y = c."""
+    # Each input contains a cone center and the measured distance to that center.
+    # Subtraction cancels the squared robot coordinates and leaves a straight line.
+    (x1, y1), r1 = first
+    (x2, y2), r2 = second
+    return (
+        2 * (x2 - x1),
+        2 * (y2 - y1),
+        r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2,
+    )
+
+
+def trilaterate(distances):
+    """Return the robot's estimated (x, y) in meters from three distances by color."""
+    # The guide uses three landmarks to build two equations for the robot's position.
+    if len(distances) != 3:
+        raise ValueError("Provide distances to exactly three landmarks.")
+
+    # Each circle marks possible robot positions on the map. Its center is the
+    # cone's known (x, y), and its radius is the measured distance to that center.
+    # Start with an empty list and add one circle for each usable measurement.
+    circles = []
+    # Read one (color, distance) pair at a time from the input dictionary.
+    for color, distance in distances.items():
+        # Check the color before looking up its coordinates. Reject distances
+        # such as NaN, infinity, zero, or negative values because they cannot
+        # describe a usable radius for this calculation.
+        if color not in LANDMARKS or not math.isfinite(distance) or distance <= 0:
+            raise ValueError(f"Invalid landmark or distance: {color} = {distance}")
+        # Use the color to look up the cone's coordinates in LANDMARKS.
+        # append() adds one entry to the list, for example
+        # ((-1.2192, 1.2192), 1.0) for a yellow cone measured at 1 meter.
+        circles.append((LANDMARKS[color], distance))
+
+    # Python list indexes start at zero. Entries 0 and 1 are the first two cones.
+    # circle_difference() subtracts their circle equations and returns the
+    # three coefficients of the first line, a*x + b*y = c.
+    a, b, c = circle_difference(circles[0], circles[1])
+    # Repeat with the second and third cones. The new coefficients describe
+    # d*x + e*y = f. We need both lines to solve for the robot's x and y below.
+    d, e, f = circle_difference(circles[1], circles[2])
+    # Solve for the intersection. A near-zero determinant means the two lines
+    # cannot give a reliable unique position, so check before dividing.
+    determinant = a * e - b * d
+    if math.isclose(determinant, 0.0, abs_tol=1e-9):
+        raise ValueError("Landmark geometry does not give a unique position.")
+    # Solve the two line equations for the robot position (x, y).
+    # Both coordinates use the same determinant after flipping both signs for y.
+    return (c * e - b * f) / determinant, (a * f - c * d) / determinant
+
+
+def grid_cell(x, y):
+    """Number the cells west to east, starting with the northernmost row."""
+    if not (-HALF_WIDTH_M <= x <= HALF_WIDTH_M
+            and -HALF_WIDTH_M <= y <= HALF_WIDTH_M):
+        return None
+    # Measure x from the west edge and y from the north edge, then divide by
+    # the cell width. Keep points exactly on the outer edge in the last cell.
+    column = min(GRID_SIZE - 1, int((x + HALF_WIDTH_M) / CELL_SIZE_M))
+    row = min(GRID_SIZE - 1, int((HALF_WIDTH_M - y) / CELL_SIZE_M))
+    # Row and column start at zero. The assignment numbers its first cell as 1.
+    return row * GRID_SIZE + column + 1
+
+
+# Optional stationary check. Use --diagnose --hue to print one color's
+# image coordinates and the forward LiDAR readings. Compare the output with
+# and without a cylinder while the robot stays in the same pose.
+def diagnose(hue, seconds):
+    """Display one color detection and raw forward LiDAR readings at rest."""
+    # HamBot comes from the professor's robot_systems library on the Raspberry Pi.
+    # Import it here so the offline calculation can run on a PC without that library.
+    from robot_systems.robot import HamBot
+
+    # HamBot initializes the Pi Camera and LiDAR. Access the camera through
+    # robot.camera. This diagnostic sends no wheel-speed commands.
+    robot = HamBot(drivetrain="2WD", lidar_enabled=True,
+                   camera_enabled=True, camera_type="PICAM")
+    try:
+        if robot.camera is None:
+            raise RuntimeError("Pi Camera did not initialize.")
+        # Start with the demo's thresholds. Real colors need an on-site check.
+        robot.camera.set_target_colors(
+            (hue, 200, 150), hue_tolerance=15, min_saturation=80, min_value=60
+        )
+        time.sleep(2)
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            # The camera object provides the image and color detections. Report
+            # the blob center and width in pixels so we can check alignment.
+            frame = robot.camera.get_frame()
+            landmarks = robot.camera.find_landmarks(min_area=800) if frame is not None else []
+            if landmarks:
+                landmark = landmarks[0]
+                print(f"Target H={hue}: x={landmark.x}, "
+                      f"image width={frame.shape[1]}, box width={landmark.width}")
+            else:
+                print(f"Target H={hue}: no detection")
+
+            # HamBot.get_range_image() returns the LiDAR scan in millimeters.
+            # Index 180 points forward. Show nearby readings individually so we
+            # can compare the cone and wall returns against a tape measurement.
+            scan = robot.get_range_image()
+            if scan is not None and not isinstance(scan, (int, float)) and len(scan) == 360:
+                readings = " ".join(
+                    f"{index}={scan[index] if scan[index] > 0 else 'invalid'}"
+                    for index in range(170, 191)
+                )
+                print(f"Front LiDAR (mm): {readings}")
+            else:
+                print("Front LiDAR: no valid scan")
+            time.sleep(0.5)
+    finally:
+        # HamBot releases its hardware connections even if a sensor read fails.
+        robot.disconnect_robot()
+
+
+def surface_at_ray_mm(scan, ray):
+    """Read the projected ray and check that a neighbor supports its range."""
+    if scan is None or isinstance(scan, (int, float)) or len(scan) != 360:
+        return None
+
+    # Keep the projected ray as the anchor. A nearer return several rays away
+    # can belong to a wall or a different cylinder.
+    center = scan[ray]
+    if not math.isfinite(center) or center <= 0:
+        return None
+    # Python excludes the slice endpoint. For ray 179, this reads 178, 179, 180.
+    # Use the selected ray as the reference and keep valid ranges within 35 mm.
+    nearby = [mm for mm in scan[ray - 1:ray + 2]
+              if math.isfinite(mm) and mm > 0 and abs(mm - center) <= 35]
+    # The selected ray is included, so a second reading confirms it from one side.
+    return median(nearby) if len(nearby) >= 2 else None
+
+
+# Optional trace output. Save one annotated photo for each accepted landmark.
+# The photo shows the detection box and the paired LiDAR ray and distance.
+def save_trace_photo(frame, box, color, ray, distance):
+    """Save the accepted camera detection and its paired LiDAR measurement."""
+    import cv2
+
+    photo = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    x, y, width, height = box
+    cv2.rectangle(photo, (int(x - width / 2), int(y - height / 2)),
+                  (int(x + width / 2), int(y + height / 2)), (0, 255, 0), 2)
+    label = f"{color} | LiDAR {ray} | {distance:.3f} m"
+    cv2.putText(photo, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                0.6, (0, 255, 0), 2)
+    # A new name on each run avoids mistaking an old capture for this run.
+    path = f"trace_{color}_{time.time_ns()}.jpg"
+    if cv2.imwrite(path, photo):
+        print(f"Saved trace photo: {path}", flush=True)
+    else:
+        print(f"Could not save trace photo: {path}", flush=True)
+
+
+def collect_distances(robot, hues, aim_columns, radius_m, seconds, trace=False,
+                      pixels_per_degree=30.0):
+    """Collect up to three distinct cylinder distances during one turn."""
+    # Store the center distance in meters and the IMU-relative bearing by color.
+    # Bearings help avoid assigning nearly the same direction to two landmarks.
+    distances = {}
+    bearings = {}
+    deadline = time.monotonic() + seconds
+    previous_heading = None
+    turned = 0.0
+    try:
+        while time.monotonic() < deadline:
+            # HamBot's IMU uses degrees counterclockwise from east. Keep track
+            # of the turn even when the reported heading wraps around zero.
+            heading = robot.get_heading(blocking=True)
+            if heading is None or not math.isfinite(heading):
+                raise RuntimeError("No valid IMU heading. Search stopped.")
+            if previous_heading is not None:
+                turned += (heading - previous_heading + 180) % 360 - 180
+            previous_heading = heading
+            fine_step = False
+            candidates = []
+
+            # The wheels stay stopped while the camera checks each remaining
+            # color. Select the candidate closest to the calibrated direction.
+            for color, hue in hues.items():
+                if color in distances:
+                    continue
+                # The corner photos showed that a higher saturation floor
+                # keeps pale wood out of the red and yellow detection boxes.
+                robot.camera.set_target_colors(
+                    (hue, 200, 150), hue_tolerance=15,
+                    min_saturation=130 if color in ("yellow", "red") else 80,
+                    min_value=60,
+                )
+                landmarks = robot.camera.find_landmarks(min_area=800)
+                # Keep a frame from this stopped pose, before the next pivot.
+                # The camera API may use an adjacent frame for detection.
+                frame = robot.camera.get_frame() if trace and landmarks else None
+                for landmark in landmarks:
+                    # A narrow strip of background can pass the shape test.
+                    # At 640x480, the false chair detections were under 90 px
+                    # tall, while the confirmed distant cylinders exceeded 200 px.
+                    # Require 120 px before pairing the color with a LiDAR range.
+                    if landmark.height < 120 or landmark.height < 1.4 * landmark.width:
+                        if trace:
+                            print(f"{color}: rejected camera box "
+                                  f"({landmark.width}x{landmark.height} px)", flush=True)
+                        continue
+                    # Compare the detected center with the calibrated image column.
+                    # Divide the pixel difference by the scale to estimate degrees.
+                    angle_error = (landmark.x - aim_columns[color]) / pixels_per_degree
+                    if 0 < angle_error <= 15:
+                        fine_step = True
+                    if abs(angle_error) <= 3:
+                        box = (landmark.x, landmark.y, landmark.width, landmark.height)
+                        candidates.append((abs(angle_error), color, angle_error, box, frame))
+
+            if candidates:
+                _, color, angle_error, box, frame = min(candidates, key=lambda item: item[:2])
+                pixel = box[0]
+                # Index 180 faces forward. On this camera, increasing x points
+                # toward smaller LiDAR indices. The conversion is approximate.
+                ray = round(180 - angle_error)
+                # Lower LiDAR indices point left, which increases IMU bearing.
+                bearing = (heading + 180 - ray) % 360
+                duplicate = any(
+                    abs((bearing - previous + 180) % 360 - 180) <= 8
+                    for previous in bearings.values()
+                )
+                readings = []
+                # The green cylinder measured about 70 px wide at 1.9 m.
+                # Width times range is roughly constant for the same object.
+                # Use a deliberately broad band to catch gross mismatches.
+                # Other colors need their own calibration before using it.
+                width = box[2]
+                range_matches_image = lambda mm: (
+                    color != "green" or 85 <= width * (mm / 1000 + radius_m) <= 200
+                )
+                # Check nearby rays during the same stop. Store each ray
+                # separately so different directions cannot confirm each other.
+                nearby_readings = {index: [] for index in (ray - 1, ray + 1, ray - 2, ray + 2)}
+                if not duplicate:
+                    # Sample the same direction while stopped. A corner may
+                    # produce a peak in range, so check repeatability instead
+                    # of requiring the cylinder to be closer than both walls.
+                    # Allow two extra reads when the LiDAR briefly misses the
+                    # cylinder. Stop sampling once three usable reads are ready.
+                    for sample in range(5):
+                        if sample:
+                            time.sleep(0.25)
+                        scan = robot.get_range_image()
+                        surface = surface_at_ray_mm(scan, ray)
+                        if surface is not None and range_matches_image(surface):
+                            readings.append(surface)
+                            if len(readings) == 3:
+                                break
+                        elif trace and surface is not None:
+                            print(f"{color}: ray {ray} rejected (range disagrees with "
+                                  f"camera width {width} px): {surface:.1f} mm", flush=True)
+                        if color == "green" or (
+                            scan is not None and not isinstance(scan, (int, float))
+                            and len(scan) == 360
+                            and (not math.isfinite(scan[ray]) or scan[ray] <= 0)
+                        ):
+                            for index, samples in nearby_readings.items():
+                                neighbor = surface_at_ray_mm(scan, index)
+                                if neighbor is not None and range_matches_image(neighbor):
+                                    samples.append(neighbor)
+
+                # Prefer the projected ray. For green, a neighbor can also
+                # rescue an incomplete or unstable set of primary readings.
+                if not readings or (color == "green" and (
+                    len(readings) < 3 or max(readings) - min(readings) > 35
+                )):
+                    for index, samples in nearby_readings.items():
+                        if len(samples) < 3 or max(samples) - min(samples) > 35:
+                            continue
+                        neighbor_bearing = (heading + 180 - index) % 360
+                        if any(abs((neighbor_bearing - previous + 180) % 360 - 180) <= 8
+                               for previous in bearings.values()):
+                            continue
+                        if trace:
+                            print(f"{color}: ray {ray} unusable, using neighbor {index}",
+                                  flush=True)
+                        ray, bearing, readings = index, neighbor_bearing, samples[:3]
+                        break
+
+                if trace:
+                    print(f"{color}: x={pixel}, LiDAR ray={ray}, bearing={bearing:.1f}, "
+                          f"surface samples (mm)={readings}, duplicate={duplicate}", flush=True)
+                if len(readings) == 3 and max(readings) - min(readings) <= 35:
+                    # Use the median of three agreeing surface ranges at this stop.
+                    # Convert millimeters to meters and add the estimated radius.
+                    distances[color] = median(readings) / 1000 + radius_m
+                    bearings[color] = bearing
+                    print(f"Recorded {color}: {distances[color]:.3f} m", flush=True)
+                    if frame is not None:
+                        save_trace_photo(frame, box, color, ray, distances[color])
+                    # Three distinct colors supply the three ranges used by the
+                    # professor's formula. The finally block stops the motors.
+                    if len(distances) == 3:
+                        return distances
+                elif trace:
+                    print(f"{color}: rejected ({'direction already used' if duplicate else 'unstable or missing range'})",
+                          flush=True)
+
+            if abs(turned) >= 360 or time.monotonic() >= deadline:
+                break
+
+            # Make shorter turns near a landmark to reduce overshoot. Stop
+            # after each turn and let both sensors refresh before measuring.
+            robot.set_left_motor_speed(-15)
+            robot.set_right_motor_speed(15)
+            time.sleep(0.04 if fine_step else 0.10)
+            robot.stop_motors()
+            time.sleep(0.5)
+    finally:
+        robot.stop_motors()
+    return distances
+
+
+def localize(hues, aim_columns, radius_m, seconds, trace=False, pixels_per_degree=30.0):
+    """Run the search on the physical HamBot and print the position and cell."""
+    # The professor's HamBot class supplies the camera, LiDAR, IMU and motors.
+    from robot_systems.robot import HamBot
+
+    robot = HamBot(drivetrain="2WD", lidar_enabled=True,
+                   camera_enabled=True, camera_type="PICAM")
+    try:
+        if robot.camera is None:
+            raise RuntimeError("Pi Camera did not initialize.")
+        time.sleep(2)
+        distances = collect_distances(
+            robot, hues, aim_columns, radius_m, seconds, trace, pixels_per_degree
+        )
+        if len(distances) < 3:
+            print(f"Search ended with {len(distances)} of 3 usable distances.")
+            return
+        x, y = trilaterate(distances)
+        print(f"Estimated position: ({x:.3f}, {y:.3f}) m")
+        print(f"Estimated cell: {grid_cell(x, y)}")
+    finally:
+        robot.disconnect_robot()
+
+
+def main():
+    """Read the command-line settings and run localization or diagnostics."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--diagnose", action="store_true",
+                       help="read the HamBot sensors without driving the wheels")
+    modes.add_argument("--localize", action="store_true",
+                       help="rotate the HamBot to measure three cones")
+    parser.add_argument("--hue", type=int, choices=range(180), metavar="0-179")
+    parser.add_argument("--hues", type=int, nargs=4,
+                        metavar=("YELLOW", "RED", "GREEN", "BLUE"))
+    parser.add_argument("--aim-x", type=float, nargs="+",
+                        help="one image column or four in yellow, red, green, blue order")
+    parser.add_argument("--radius-m", type=float, help="cone radius at LiDAR height in meters")
+    parser.add_argument("--pixels-per-degree", type=float, default=30.0,
+                        help="local camera-to-LiDAR scale in pixels per degree")
+    parser.add_argument("--seconds", type=int)
+    # Optional during localization. Print rejection details and save photos
+    # of accepted landmarks when checking what the robot measured.
+    parser.add_argument("--trace", action="store_true",
+                        help="report camera alignment and LiDAR checks during localization")
+    args = parser.parse_args()
+    if args.seconds is not None and args.seconds <= 0:
+        parser.error("--seconds must be positive.")
+    if args.diagnose:
+        if args.hue is None:
+            parser.error("--diagnose requires --hue.")
+        diagnose(args.hue, args.seconds or 10)
+    elif args.localize:
+        if not math.isfinite(args.pixels_per_degree) or args.pixels_per_degree <= 0:
+            parser.error("--pixels-per-degree must be finite and positive.")
+        # Ask for calibration values instead of assuming the colors and
+        # camera alignment from the Lab 3 setup apply to this field.
+        if args.hues is None or any(hue not in range(180) for hue in args.hues):
+            parser.error("--localize requires four --hues in the range 0 to 179.")
+        if (args.aim_x is None or len(args.aim_x) not in (1, 4)
+                or any(not math.isfinite(x) or x < 0 for x in args.aim_x)
+                or args.radius_m is None or not math.isfinite(args.radius_m)
+                or args.radius_m <= 0):
+            parser.error("--localize requires a valid --aim-x and positive --radius-m.")
+        hues = dict(zip(LANDMARKS, args.hues))
+        columns = args.aim_x * 4 if len(args.aim_x) == 1 else args.aim_x
+        localize(hues, dict(zip(LANDMARKS, columns)), args.radius_m, args.seconds or 90,
+                 trace=args.trace, pixels_per_degree=args.pixels_per_degree)
+    else:
+        parser.error("Choose --localize or --diagnose.")
+
+
+if __name__ == "__main__":
+    main()
 
