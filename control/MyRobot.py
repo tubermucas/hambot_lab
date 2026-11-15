@@ -3,6 +3,8 @@ from robot_systems.camera import Camera
 
 import time
 import math 
+import statistics
+import random
 
 class MyRobot(HamBot):
     # Physical dimensions
@@ -20,6 +22,28 @@ class MyRobot(HamBot):
     DEPTH_MATCH_TOLERANCE = 0.5 # Adjust the tolerance for depth matching.
     WALL_LOST = 0.4 # was 0.35 and 0.3
     FRONT_CLEARANCE = 0.3
+    CELL_LIMIT = 0.45
+
+    # (N, E, S, W) — 1 means "wall on that side"
+    MAP = {
+        1: (1, 0, 0, 1),
+        2: (1, 1, 0, 0),
+        3: (1, 0, 1, 1),
+        4: (1, 1, 0, 0),
+        5: (0, 1, 0, 1),
+        6: (0, 0, 1, 1),
+        7: (1, 1, 0, 0),
+        8: (0, 1, 0, 1),
+        9: (0, 0, 0, 1),
+        10: (1, 1, 0, 0),
+        11: (0, 0, 1, 1),
+        12: (0, 1, 0, 0),
+        13: (0, 1, 1, 1),
+        14: (0, 0, 1, 1),
+        15: (1, 1, 1, 0),
+        16: (0, 1, 1, 1)
+    }
+
 
 
     def __init__(self):
@@ -114,6 +138,240 @@ class MyRobot(HamBot):
         if frame is not None:
             return frame.shape[1]  # Return the width of the frame
         return 0
+
+    def check_walls(self):
+        scan = self.get_range_image()
+        
+        front_values = [d for d in scan[175:186] if math.isfinite(d) and d > 0]
+        front = statistics.median(front_values) if front_values else None
+
+        left_values = [d for d in scan[85:96] if math.isfinite(d) and d > 0]
+        left = statistics.median(left_values) if left_values else None
+
+        right_values = [d for d in scan[265:276] if math.isfinite(d) and d > 0]
+        right = statistics.median(right_values) if right_values else None
+
+        back_values = [d for d in scan[0:6] + scan[355:360] if math.isfinite(d) and d > 0]
+        back = statistics.median(back_values) if back_values else None
+
+        walls = [0, 0, 0, 0] # [forward, right, backward, left]
+
+        if front is not None and front < self.CELL_LIMIT:
+            walls[0] = 1
+        if right is not None and right < self.CELL_LIMIT:
+            walls[1] = 1
+        if back is not None and back < self.CELL_LIMIT:
+            walls[2] = 1
+        if left is not None and left < self.CELL_LIMIT:
+            walls[3] = 1
+
+        return walls
+
+
+    def choose_action(self, prev_action):
+        available_actions = self.check_walls()
+
+        if prev_action == "forward" and available_actions[0] == 1:
+            return "forward"
+        if prev_action == "right" and available_actions[1] == 1:
+            return "right"
+        if prev_action == "backward" and available_actions[2] == 1:
+            return "backward"
+        if prev_action == "left" and available_actions[3] == 1:
+            return "left"
+ 
+        ones_indices = [i for i, val in enumerate(available_actions) if val == 1]
+        random_index = random.choice(ones_indices) if ones_indices else None
+
+        if random_index is not None:
+            if random_index == 0:
+                return "forward"
+            elif random_index == 1:
+                return "right"
+            elif random_index == 2:
+                return "backward"
+            elif random_index == 3:
+                return "left"
+
+        return None
+
+    def execute_action(self, action):
+
+        if action == "right":
+            self.compass_pid(-80, 0.7, 0.02, 0.05)
+        if action == "backward":
+            self.compass_pid(170, 0.7, 0.02, 0.05)
+        if action == "left":
+            self.compass_pid(80, 0.7, 0.02, 0.05)
+
+        self.encoder_pid(0.3, 6, 0.2, 0.4)
+
+    def update_particle(self, particle, action):
+        cell, orientation = particle
+
+        walls = self.MAP[cell]
+
+        if action == "forward":
+            if orientation == "N" and walls[0] == 0:
+                cell -= 4
+            elif orientation == "E" and walls[1] == 0:
+                cell += 1
+            elif orientation == "S" and walls[2] == 0:
+                cell += 4
+            elif orientation == "W" and walls[3] == 0:
+                cell -= 1
+
+        elif action == "right":
+            if orientation == "N" and walls[1] == 0:
+                cell += 1
+            elif orientation == "E" and walls[2] == 0:
+                cell += 4
+            elif orientation == "S" and walls[3] == 0:
+                cell -= 1
+            elif orientation == "W" and walls[0] == 0:
+                cell -= 4
+
+        elif action == "backward":
+            if orientation == "N" and walls[2] == 0:
+                cell += 4
+            elif orientation == "E" and walls[3] == 0:
+                cell -= 1
+            elif orientation == "S" and walls[0] == 0:
+                cell -= 4
+            elif orientation == "W" and walls[1] == 0:
+                cell += 1
+
+        elif action == "left":
+            if orientation == "N" and walls[3] == 0:
+                cell -= 1
+            elif orientation == "E" and walls[0] == 0:
+                cell -= 4
+            elif orientation == "S" and walls[1] == 0:
+                cell += 1
+            elif orientation == "W" and walls[2] == 0:
+                cell += 4
+
+        return (cell, orientation)
+
+    def observe_walls(self):
+        heading = self.get_heading()
+
+        walls = self.check_walls()
+
+        mesured_walls = [0, 0, 0, 0]  # [N, E, S, W]
+
+        # North
+        if 85 <= heading <= 95:
+            mesured_walls[0] = walls[0]
+            mesured_walls[1] = walls[1]
+            mesured_walls[2] = walls[2]
+            mesured_walls[3] = walls[3]
+        # West
+        elif 175 <= heading <= 185:
+            mesured_walls[0] = walls[1]
+            mesured_walls[1] = walls[0]
+            mesured_walls[2] = walls[3]
+            mesured_walls[3] = walls[2]
+
+        # South
+        elif 265 <= heading <= 275:
+            mesured_walls[0] = walls[2]
+            mesured_walls[1] = walls[3]
+            mesured_walls[2] = walls[0]
+            mesured_walls[3] = walls[1]
+
+        # East
+        elif heading <= 5 or heading >= 355:
+            mesured_walls[0] = walls[3]
+            mesured_walls[1] = walls[0]
+            mesured_walls[2] = walls[1]
+            mesured_walls[3] = walls[2]
+
+        return mesured_walls
+
+    def sensor_model(self, s, z):
+        if s == 0 and z == 0:
+            return 0.6
+        elif s == 0 and z == 1:
+            return 0.4
+        elif s == 1 and z == 0:
+            return 0.2
+        elif s == 1 and z == 1:
+            return 0.8
+
+    def normilize(weights):
+        total_weight = sum(weights)
+        if total_weight == 0:
+            raise ValueError("Total weight is zero, cannot normalize.")
+        return [w / total_weight for w in weights]
+
+    def get_histogram(self, cells):
+        histogram = []
+        for cell in range(1, 17):
+            histogram.append(cells.count(cell))
+        return histogram
+
+    def print_grid(self, counts):
+        pass
+
+    """
+    ---- Localizaion: Particle Filter functions ----
+    """
+
+    def particle_filter(self):
+
+        num_particles = 160
+        particles = [ (cell, random.choice(["N", "E", "S", "W"])) 
+                     for cell in range(1, 17) for _ in range(1, 11) ]
+
+        weights = [1.0 / num_particles] * num_particles
+
+        prev_action = "forward"
+
+        while True: 
+            action = self.choose_action(prev_action)
+
+            if action is None:
+                print("No available actions: stopping robot.")
+                self.stop_motors()
+                break
+
+            prev_action = action
+
+            self.execute_action(action)
+            for i in range(1, num_particles+1):
+                particles[i] = self.update_particle(particles[i], action)
+
+            mes_z = self.observe_walls()
+            for i in range(1, num_particles+1):
+                particle = particles[i]
+                cell = particle[0]
+                expected_walls = self.MAP[cell]
+
+                likelihood = 1.0
+                for j in range(4):
+                    likelihood *= self.sensor_model(expected_walls[j], mes_z[j])
+                
+                weights[i] = likelihood
+
+            weights = self.normilize(weights)
+
+            drawn = random.choices(particles, weights=weights, k=num_particles)
+            particles = [ (p[0], random.choice(['N','E','S','W'])) for p in drawn ]
+            weights = [1.0 / num_particles] * num_particles
+
+
+
+            counts = self.get_histogram(p[0] for p in particles)
+            self.print_grid(counts)
+            mode_cell = max(counts)
+            if (counts[mode_cell] >= 0.80 * num_particles):
+                print(f"Robot is localized in cell {mode_cell}")
+                break
+
+            
+
+
 
     """
     ---- Bug Zero Algorithm functions ----
