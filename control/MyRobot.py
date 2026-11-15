@@ -138,24 +138,360 @@ class MyRobot(HamBot):
         if frame is not None:
             return frame.shape[1]  # Return the width of the frame
         return 0
+    """
+    ---- Localization: Trilateration functions ----
+    """
+
+    # Each physical cell is 2 feet wide. Use meters throughout the calculations.
+    CELL_SIZE_M = 0.6096
+    # Use the four rows and four columns shown inside the physical maze in Figure 5b.
+    GRID_SIZE = 4
+    # The origin is at the grid center. Divide the full width by two to find each edge.
+    HALF_WIDTH_M = GRID_SIZE * CELL_SIZE_M / 2
+
+    # Each color is a dictionary key for its known cone center (x, y) in meters.
+    # Positive x points east and positive y points north. These values assume the
+    # cone centers sit exactly on the corners. Use measured coordinates if they differ.
+    LANDMARKS = {
+        "yellow": (-HALF_WIDTH_M, HALF_WIDTH_M),
+        "red": (HALF_WIDTH_M, HALF_WIDTH_M),
+        "green": (-HALF_WIDTH_M, -HALF_WIDTH_M),
+        "blue": (HALF_WIDTH_M, -HALF_WIDTH_M),
+    }
+
+    def circle_difference(self, first, second):
+        """Subtract two circle equations to get a line: a*x + b*y = c."""
+        # Each input contains a cone center and the measured distance to that center.
+        # Subtraction cancels the squared robot coordinates and leaves a straight line.
+        (x1, y1), r1 = first
+        (x2, y2), r2 = second
+        return (
+            2 * (x2 - x1),
+            2 * (y2 - y1),
+            r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2,
+        )
+
+    def trilaterate(self, distances):
+        """Return the robot's estimated (x, y) in meters from three distances by color."""
+        # The guide uses three landmarks to build two equations for the robot's position.
+        if len(distances) != 3:
+            raise ValueError("Provide distances to exactly three landmarks.")
+
+        # Each circle marks possible robot positions on the map. Its center is the
+        # cone's known (x, y), and its radius is the measured distance to that center.
+        # Start with an empty list and add one circle for each usable measurement.
+        circles = []
+        # Read one (color, distance) pair at a time from the input dictionary.
+        for color, distance in distances.items():
+            # Check the color before looking up its coordinates. Reject distances
+            # such as NaN, infinity, zero, or negative values because they cannot
+            # describe a usable radius for this calculation.
+            if color not in self.LANDMARKS or not math.isfinite(distance) or distance <= 0:
+                raise ValueError(f"Invalid landmark or distance: {color} = {distance}")
+            # Use the color to look up the cone's coordinates in self.LANDMARKS.
+            # append() adds one entry to the list, for example
+            # ((-1.2192, 1.2192), 1.0) for a yellow cone measured at 1 meter.
+            circles.append((self.LANDMARKS[color], distance))
+
+        # Python list indexes start at zero. Entries 0 and 1 are the first two cones.
+        # self.circle_difference() subtracts their circle equations and returns the
+        # three coefficients of the first line, a*x + b*y = c.
+        a, b, c = self.circle_difference(circles[0], circles[1])
+        # Repeat with the second and third cones. The new coefficients describe
+        # d*x + e*y = f. We need both lines to solve for the robot's x and y below.
+        d, e, f = self.circle_difference(circles[1], circles[2])
+        # Solve for the intersection. A near-zero determinant means the two lines
+        # cannot give a reliable unique position, so check before dividing.
+        determinant = a * e - b * d
+        if math.isclose(determinant, 0.0, abs_tol=1e-9):
+            raise ValueError("Landmark geometry does not give a unique position.")
+        # Solve the two line equations for the robot position (x, y).
+        # Both coordinates use the same determinant after flipping both signs for y.
+        return (c * e - b * f) / determinant, (a * f - c * d) / determinant
+
+    def grid_cell(self, x, y):
+        """Number the cells west to east, starting with the northernmost row."""
+        if not (-self.HALF_WIDTH_M <= x <= self.HALF_WIDTH_M
+                and -self.HALF_WIDTH_M <= y <= self.HALF_WIDTH_M):
+            return None
+        # Measure x from the west edge and y from the north edge, then divide by
+        # the cell width. Keep points exactly on the outer edge in the last cell.
+        column = min(self.GRID_SIZE - 1, int((x + self.HALF_WIDTH_M) / self.CELL_SIZE_M))
+        row = min(self.GRID_SIZE - 1, int((self.HALF_WIDTH_M - y) / self.CELL_SIZE_M))
+        # Row and column start at zero. The assignment numbers its first cell as 1.
+        return row * self.GRID_SIZE + column + 1
+
+    def diagnose(self, hue, seconds):
+        """Display one color detection and raw forward LiDAR readings at rest."""
+        if self.camera is None:
+            raise RuntimeError("Pi Camera did not initialize.")
+        # Start with the demo's thresholds. Real colors need an on-site check.
+        self.camera.set_target_colors(
+            (hue, 200, 150), hue_tolerance=15, min_saturation=80, min_value=60
+        )
+        time.sleep(2)
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            # The camera object provides the image and color detections. Report
+            # the blob center and width in pixels so we can check alignment.
+            frame = self.camera.get_frame()
+            landmarks = self.camera.find_landmarks(min_area=800) if frame is not None else []
+            if landmarks:
+                landmark = landmarks[0]
+                print(f"Target H={hue}: x={landmark.x}, "
+                      f"image width={frame.shape[1]}, box width={landmark.width}")
+            else:
+                print(f"Target H={hue}: no detection")
+
+            # HamBot.get_range_image() returns the LiDAR scan in millimeters.
+            # Index 180 points forward. Show nearby readings individually so we
+            # can compare the cone and wall returns against a tape measurement.
+            scan = self.get_range_image()
+            if scan is not None and not isinstance(scan, (int, float)) and len(scan) == 360:
+                readings = " ".join(
+                    f"{index}={scan[index] if scan[index] > 0 else 'invalid'}"
+                    for index in range(170, 191)
+                )
+                print(f"Front LiDAR (mm): {readings}")
+            else:
+                print("Front LiDAR: no valid scan")
+            time.sleep(0.5)
+
+    def surface_at_ray_mm(self, scan, ray):
+        """Read the projected ray and check that a neighbor supports its range."""
+        if scan is None or isinstance(scan, (int, float)) or len(scan) != 360:
+            return None
+
+        # Keep the projected ray as the anchor. A nearer return several rays away
+        # can belong to a wall or a different cylinder.
+        center = scan[ray]
+        if not math.isfinite(center) or center <= 0:
+            return None
+        # Python excludes the slice endpoint. For ray 179, this reads 178, 179, 180.
+        # Use the selected ray as the reference and keep valid ranges within 35 mm.
+        nearby = [mm for mm in scan[ray - 1:ray + 2]
+                  if math.isfinite(mm) and mm > 0 and abs(mm - center) <= 35]
+        # The selected ray is included, so a second reading confirms it from one side.
+        return statistics.median(nearby) if len(nearby) >= 2 else None
+
+    def save_trace_photo(self, frame, box, color, ray, distance):
+        """Save the accepted camera detection and its paired LiDAR measurement."""
+        import cv2
+
+        photo = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        x, y, width, height = box
+        cv2.rectangle(photo, (int(x - width / 2), int(y - height / 2)),
+                      (int(x + width / 2), int(y + height / 2)), (0, 255, 0), 2)
+        label = f"{color} | LiDAR {ray} | {distance:.3f} m"
+        cv2.putText(photo, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 0), 2)
+        # A new name on each run avoids mistaking an old capture for this run.
+        path = f"trace_{color}_{time.time_ns()}.jpg"
+        if cv2.imwrite(path, photo):
+            print(f"Saved trace photo: {path}", flush=True)
+        else:
+            print(f"Could not save trace photo: {path}", flush=True)
+
+    def collect_distances(self, hues, aim_columns, radius_m, seconds, trace=False,
+                          pixels_per_degree=30.0):
+        """Collect up to three distinct cylinder distances during one turn."""
+        # Store the center distance in meters and the IMU-relative bearing by color.
+        # Bearings help avoid assigning nearly the same direction to two landmarks.
+        distances = {}
+        bearings = {}
+        deadline = time.monotonic() + seconds
+        previous_heading = None
+        turned = 0.0
+        try:
+            while time.monotonic() < deadline:
+                # HamBot's IMU uses degrees counterclockwise from east. Keep track
+                # of the turn even when the reported heading wraps around zero.
+                heading = self.get_heading(blocking=True)
+                if heading is None or not math.isfinite(heading):
+                    raise RuntimeError("No valid IMU heading. Search stopped.")
+                if previous_heading is not None:
+                    turned += (heading - previous_heading + 180) % 360 - 180
+                previous_heading = heading
+                fine_step = False
+                candidates = []
+
+                # The wheels stay stopped while the camera checks each remaining
+                # color. Select the candidate closest to the calibrated direction.
+                for color, hue in hues.items():
+                    if color in distances:
+                        continue
+                    # The corner photos showed that a higher saturation floor
+                    # keeps pale wood out of the red and yellow detection boxes.
+                    self.camera.set_target_colors(
+                        (hue, 200, 150), hue_tolerance=15,
+                        min_saturation=130 if color in ("yellow", "red") else 80,
+                        min_value=60,
+                    )
+                    landmarks = self.camera.find_landmarks(min_area=800)
+                    # Keep a frame from this stopped pose, before the next pivot.
+                    # The camera API may use an adjacent frame for detection.
+                    frame = self.camera.get_frame() if trace and landmarks else None
+                    for landmark in landmarks:
+                        # A narrow strip of background can pass the shape test.
+                        # At 640x480, the false chair detections were under 90 px
+                        # tall, while the confirmed distant cylinders exceeded 200 px.
+                        # Require 120 px before pairing the color with a LiDAR range.
+                        if landmark.height < 120 or landmark.height < 1.4 * landmark.width:
+                            if trace:
+                                print(f"{color}: rejected camera box "
+                                      f"({landmark.width}x{landmark.height} px)", flush=True)
+                            continue
+                        # Compare the detected center with the calibrated image column.
+                        # Divide the pixel difference by the scale to estimate degrees.
+                        angle_error = (landmark.x - aim_columns[color]) / pixels_per_degree
+                        if 0 < angle_error <= 15:
+                            fine_step = True
+                        if abs(angle_error) <= 3:
+                            box = (landmark.x, landmark.y, landmark.width, landmark.height)
+                            candidates.append((abs(angle_error), color, angle_error, box, frame))
+
+                if candidates:
+                    _, color, angle_error, box, frame = min(candidates, key=lambda item: item[:2])
+                    pixel = box[0]
+                    # Index 180 faces forward. On this camera, increasing x points
+                    # toward smaller LiDAR indices. The conversion is approximate.
+                    ray = round(180 - angle_error)
+                    # Lower LiDAR indices point left, which increases IMU bearing.
+                    bearing = (heading + 180 - ray) % 360
+                    duplicate = any(
+                        abs((bearing - previous + 180) % 360 - 180) <= 8
+                        for previous in bearings.values()
+                    )
+                    readings = []
+                    # The green cylinder measured about 70 px wide at 1.9 m.
+                    # Width times range is roughly constant for the same object.
+                    # Use a deliberately broad band to catch gross mismatches.
+                    # Other colors need their own calibration before using it.
+                    width = box[2]
+                    range_matches_image = lambda mm: (
+                        color != "green" or 85 <= width * (mm / 1000 + radius_m) <= 200
+                    )
+                    # Check nearby rays during the same stop. Store each ray
+                    # separately so different directions cannot confirm each other.
+                    nearby_readings = {index: [] for index in (ray - 1, ray + 1, ray - 2, ray + 2)}
+                    if not duplicate:
+                        # Sample the same direction while stopped. A corner may
+                        # produce a peak in range, so check repeatability instead
+                        # of requiring the cylinder to be closer than both walls.
+                        # Allow two extra reads when the LiDAR briefly misses the
+                        # cylinder. Stop sampling once three usable reads are ready.
+                        for sample in range(5):
+                            if sample:
+                                time.sleep(0.25)
+                            scan = self.get_range_image()
+                            surface = self.surface_at_ray_mm(scan, ray)
+                            if surface is not None and range_matches_image(surface):
+                                readings.append(surface)
+                                if len(readings) == 3:
+                                    break
+                            elif trace and surface is not None:
+                                print(f"{color}: ray {ray} rejected (range disagrees with "
+                                      f"camera width {width} px): {surface:.1f} mm", flush=True)
+                            if color == "green" or (
+                                scan is not None and not isinstance(scan, (int, float))
+                                and len(scan) == 360
+                                and (not math.isfinite(scan[ray]) or scan[ray] <= 0)
+                            ):
+                                for index, samples in nearby_readings.items():
+                                    neighbor = self.surface_at_ray_mm(scan, index)
+                                    if neighbor is not None and range_matches_image(neighbor):
+                                        samples.append(neighbor)
+
+                    # Prefer the projected ray. For green, a neighbor can also
+                    # rescue an incomplete or unstable set of primary readings.
+                    if not readings or (color == "green" and (
+                        len(readings) < 3 or max(readings) - min(readings) > 35
+                    )):
+                        for index, samples in nearby_readings.items():
+                            if len(samples) < 3 or max(samples) - min(samples) > 35:
+                                continue
+                            neighbor_bearing = (heading + 180 - index) % 360
+                            if any(abs((neighbor_bearing - previous + 180) % 360 - 180) <= 8
+                                   for previous in bearings.values()):
+                                continue
+                            if trace:
+                                print(f"{color}: ray {ray} unusable, using neighbor {index}",
+                                      flush=True)
+                            ray, bearing, readings = index, neighbor_bearing, samples[:3]
+                            break
+
+                    if trace:
+                        print(f"{color}: x={pixel}, LiDAR ray={ray}, bearing={bearing:.1f}, "
+                              f"surface samples (mm)={readings}, duplicate={duplicate}", flush=True)
+                    if len(readings) == 3 and max(readings) - min(readings) <= 35:
+                        # Use the median of three agreeing surface ranges at this stop.
+                        # Convert millimeters to meters and add the estimated radius.
+                        distances[color] = statistics.median(readings) / 1000 + radius_m
+                        bearings[color] = bearing
+                        print(f"Recorded {color}: {distances[color]:.3f} m", flush=True)
+                        if frame is not None:
+                            self.save_trace_photo(frame, box, color, ray, distances[color])
+                        # Three distinct colors supply the three ranges used by the
+                        # professor's formula. The finally block stops the motors.
+                        if len(distances) == 3:
+                            return distances
+                    elif trace:
+                        print(f"{color}: rejected ({'direction already used' if duplicate else 'unstable or missing range'})",
+                              flush=True)
+
+                if abs(turned) >= 360 or time.monotonic() >= deadline:
+                    break
+
+                # Make shorter turns near a landmark to reduce overshoot. Stop
+                # after each turn and let both sensors refresh before measuring.
+                self.set_left_motor_speed(-15)
+                self.set_right_motor_speed(15)
+                time.sleep(0.04 if fine_step else 0.10)
+                self.stop_motors()
+                time.sleep(0.5)
+        finally:
+            self.stop_motors()
+        return distances
+
+    def localize(self, hues, aim_columns, radius_m, seconds, trace=False, pixels_per_degree=30.0):
+        """Run the search on the physical HamBot and print the position and cell."""
+        if self.camera is None:
+            raise RuntimeError("Pi Camera did not initialize.")
+        time.sleep(2)
+        distances = self.collect_distances(
+            hues, aim_columns, radius_m, seconds, trace, pixels_per_degree
+        )
+        if len(distances) < 3:
+            print(f"Search ended with {len(distances)} of 3 usable distances.")
+            return
+        x, y = self.trilaterate(distances)
+        print(f"Estimated position: ({x:.3f}, {y:.3f}) m")
+        print(f"Estimated cell: {self.grid_cell(x, y)}")
+
+    """
+    ---- Localization: Particle Filter functions ----
+    """
 
     def check_walls(self):
+
+        # Get the LiDAR scan and check the distances in the four cardinal directions
         scan = self.get_range_image()
         
         front_values = [d for d in scan[175:186] if math.isfinite(d) and d > 0]
-        front = statistics.median(front_values) if front_values else None
+        front = statistics.median(front_values) / 1000.0 if front_values else None
 
         left_values = [d for d in scan[85:96] if math.isfinite(d) and d > 0]
-        left = statistics.median(left_values) if left_values else None
+        left = statistics.median(left_values) / 1000.0 if left_values else None
 
         right_values = [d for d in scan[265:276] if math.isfinite(d) and d > 0]
-        right = statistics.median(right_values) if right_values else None
+        right = statistics.median(right_values) / 1000.0 if right_values else None
 
         back_values = [d for d in scan[0:6] + scan[355:360] if math.isfinite(d) and d > 0]
-        back = statistics.median(back_values) if back_values else None
+        back = statistics.median(back_values) / 1000.0 if back_values else None
 
         walls = [0, 0, 0, 0] # [forward, right, backward, left]
 
+        # Check if there is a wall in each direction
         if front is not None and front < self.CELL_LIMIT:
             walls[0] = 1
         if right is not None and right < self.CELL_LIMIT:
@@ -168,35 +504,24 @@ class MyRobot(HamBot):
         return walls
 
 
-    def choose_action(self, prev_action):
-        available_actions = self.check_walls()
+    def choose_action(self):
+        walls = self.check_walls()
+        actions = ["forward", "right", "backward", "left"]
 
-        if prev_action == "forward" and available_actions[0] == 1:
+        # Prefer forward movement if there are no walls
+        if walls[0] == 0:
             return "forward"
-        if prev_action == "right" and available_actions[1] == 1:
-            return "right"
-        if prev_action == "backward" and available_actions[2] == 1:
-            return "backward"
-        if prev_action == "left" and available_actions[3] == 1:
-            return "left"
- 
-        ones_indices = [i for i, val in enumerate(available_actions) if val == 1]
-        random_index = random.choice(ones_indices) if ones_indices else None
 
-        if random_index is not None:
-            if random_index == 0:
-                return "forward"
-            elif random_index == 1:
-                return "right"
-            elif random_index == 2:
-                return "backward"
-            elif random_index == 3:
-                return "left"
-
+        # Pick a random action
+        open_actions = [action for action, wall in zip(actions, walls) if wall == 0]
+        if open_actions:
+            return random.choice(open_actions)
+        
         return None
 
     def execute_action(self, action):
-
+        
+        # Rotate the robot based on the action
         if action == "right":
             self.compass_pid(-80, 0.7, 0.02, 0.05)
         if action == "backward":
@@ -204,13 +529,22 @@ class MyRobot(HamBot):
         if action == "left":
             self.compass_pid(80, 0.7, 0.02, 0.05)
 
-        self.encoder_pid(0.3, 6, 0.2, 0.4)
+        # Move forward a cell
+        self.encoder_pid(0.6, 6, 0.2, 0.4)
 
     def update_particle(self, particle, action):
         cell, orientation = particle
 
+        directions = ["N", "E", "S", "W"]
+        turns = {"forward": 0, "right": 1, "backward": 2, "left": -1}
+
+        # Rotate a particle based on the action 
+        heading_index = (directions.index(orientation) + turns[action]) % 4
+        orientation = directions[heading_index]
+
         walls = self.MAP[cell]
 
+        # Determine the new cell based on the action and orientation
         if action == "forward":
             if orientation == "N" and walls[0] == 0:
                 cell -= 4
@@ -255,41 +589,26 @@ class MyRobot(HamBot):
 
     def observe_walls(self):
         heading = self.get_heading()
+        if heading is None or not math.isfinite(heading):
+            raise RuntimeError("Invalid compass reading")
 
-        walls = self.check_walls()
+        heading = (int((heading % 360 + 45) // 90) * 90) % 360
+        front, right, back, left = self.check_walls()
 
-        mesured_walls = [0, 0, 0, 0]  # [N, E, S, W]
-
-        # North
-        if 85 <= heading <= 95:
-            mesured_walls[0] = walls[0]
-            mesured_walls[1] = walls[1]
-            mesured_walls[2] = walls[2]
-            mesured_walls[3] = walls[3]
-        # West
-        elif 175 <= heading <= 185:
-            mesured_walls[0] = walls[1]
-            mesured_walls[1] = walls[0]
-            mesured_walls[2] = walls[3]
-            mesured_walls[3] = walls[2]
-
-        # South
-        elif 265 <= heading <= 275:
-            mesured_walls[0] = walls[2]
-            mesured_walls[1] = walls[3]
-            mesured_walls[2] = walls[0]
-            mesured_walls[3] = walls[1]
-
-        # East
-        elif heading <= 5 or heading >= 355:
-            mesured_walls[0] = walls[3]
-            mesured_walls[1] = walls[0]
-            mesured_walls[2] = walls[1]
-            mesured_walls[3] = walls[2]
+        # Convert local heading to global wall measurements 
+        if heading == 0:
+            mesured_walls = [left,  front, right, back]
+        elif heading == 90:
+            mesured_walls = [front, right, back,  left]
+        elif heading == 180:
+            mesured_walls = [right, back,  left,  front]
+        elif heading == 270:
+            mesured_walls = [back,  left,  front, right]
 
         return mesured_walls
 
     def sensor_model(self, s, z):
+        # Provided sensor model probabilities
         if s == 0 and z == 0:
             return 0.6
         elif s == 0 and z == 1:
@@ -299,79 +618,90 @@ class MyRobot(HamBot):
         elif s == 1 and z == 1:
             return 0.8
 
-    def normilize(weights):
+    def normalize(self, weights):
+        # Normalize the weights to sum to 1
         total_weight = sum(weights)
         if total_weight == 0:
             raise ValueError("Total weight is zero, cannot normalize.")
         return [w / total_weight for w in weights]
 
     def get_histogram(self, cells):
-        histogram = []
-        for cell in range(1, 17):
-            histogram.append(cells.count(cell))
-        return histogram
+        # Get the histogram of cell visits
+        counts = dict.fromkeys(self.MAP, 0)
+        for cell in cells:
+            counts[cell] += 1
+        return counts
 
     def print_grid(self, counts):
-        pass
-
-    """
-    ---- Localizaion: Particle Filter functions ----
-    """
+        # Print the grid of cell counts in a 4x4 format
+        for start in range(1, 17, 4):
+            print(" ".join(f"{counts[cell]:4d}" for cell in range(start, start + 4)))
 
     def particle_filter(self):
-
+        # Declare variables 
         num_particles = 160
         particles = [ (cell, random.choice(["N", "E", "S", "W"])) 
                      for cell in range(1, 17) for _ in range(1, 11) ]
 
         weights = [1.0 / num_particles] * num_particles
-
-        prev_action = "forward"
+        iteration = 0
 
         while True: 
-            action = self.choose_action(prev_action)
+            print(f"Iteration: {iteration}")
+            iteration += 1
+
+            # Choose an action for the robot
+            action = self.choose_action()
 
             if action is None:
                 print("No available actions: stopping robot.")
                 self.stop_motors()
                 break
 
-            prev_action = action
-
+            # Execute action and move particles accordingly
             self.execute_action(action)
-            for i in range(1, num_particles+1):
+            for i in range(num_particles):
                 particles[i] = self.update_particle(particles[i], action)
 
+            # Get the wall measurements 
             mes_z = self.observe_walls()
-            for i in range(1, num_particles+1):
+            for i in range(num_particles):
                 particle = particles[i]
                 cell = particle[0]
                 expected_walls = self.MAP[cell]
 
+                # Compute the likelihood 
                 likelihood = 1.0
                 for j in range(4):
                     likelihood *= self.sensor_model(expected_walls[j], mes_z[j])
                 
                 weights[i] = likelihood
 
-            weights = self.normilize(weights)
+            # Normalize the weights
+            weights = self.normalize(weights)
 
+            # Resample particles based on their weights
             drawn = random.choices(particles, weights=weights, k=num_particles)
             particles = [ (p[0], random.choice(['N','E','S','W'])) for p in drawn ]
             weights = [1.0 / num_particles] * num_particles
 
-
-
+            # Get the histogram of particle states
             counts = self.get_histogram(p[0] for p in particles)
             self.print_grid(counts)
-            mode_cell = max(counts)
-            if (counts[mode_cell] >= 0.80 * num_particles):
+
+            # Determine the most likely cell and its concentration
+            mode_cell = max(counts, key=counts.get)
+            concentration = counts[mode_cell] / num_particles
+            localized = concentration >= 0.80
+
+            print(f"Mode cell: {mode_cell}")
+            print(f"Concentration: {concentration:.1%}")
+            print(f"80% localized: {localized}")
+
+            # Finish if the robot is localized 
+            if localized:
                 print(f"Robot is localized in cell {mode_cell}")
                 break
-
-            
-
-
 
     """
     ---- Bug Zero Algorithm functions ----
@@ -768,11 +1098,13 @@ class MyRobot(HamBot):
                 f"D={derivative_term:.2f}, l_speed={left_speed:.2f}, r_speed={right_speed:.2f}"
             )
 
+            """
             # True assumes the cylinder's full width is visible, without occlusion.
             if self.check_landmarks():
                 self.stop_motors()
                 return True
-
+            """
+            
             if abs(error) <= self.ANGLE_TOLERANCE:
                 self.stop_motors()
                 break
