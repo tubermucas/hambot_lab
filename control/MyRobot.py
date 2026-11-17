@@ -1,3 +1,4 @@
+from turtle import position
 from robot_systems.robot import HamBot
 from robot_systems.camera import Camera
 
@@ -22,7 +23,7 @@ class MyRobot(HamBot):
     DEPTH_MATCH_TOLERANCE = 0.5 # Adjust the tolerance for depth matching.
     WALL_LOST = 0.4 # was 0.35 and 0.3
     FRONT_CLEARANCE = 0.3
-    CELL_LIMIT = 0.45
+    CELL_LIMIT = 0.5
 
     # (N, E, S, W) — 1 means "wall on that side"
     MAP = {
@@ -471,11 +472,24 @@ class MyRobot(HamBot):
     """
     ---- Localization: Particle Filter functions ----
     """
+    # Get a LiDAR scan and ensure that all readings are valid (greater than 0). If not, retry until timeout.
+    def get_scan(self, timeout=5):
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            scan = self.get_range_image()
+            #print(f"LiDAR scan: {scan}")  # Debugging output
+            if max(scan[175:185]) > 0:
+                return scan
+
+            time.sleep(0.05)
+
+        raise RuntimeError("LiDAR reading timed out.")
 
     def check_walls(self):
 
         # Get the LiDAR scan and check the distances in the four cardinal directions
-        scan = self.get_range_image()
+        scan = self.get_scan()
         
         front_values = [d for d in scan[175:186] if math.isfinite(d) and d > 0]
         front = statistics.median(front_values) / 1000.0 if front_values else None
@@ -489,103 +503,111 @@ class MyRobot(HamBot):
         back_values = [d for d in scan[0:6] + scan[355:360] if math.isfinite(d) and d > 0]
         back = statistics.median(back_values) / 1000.0 if back_values else None
 
-        walls = [0, 0, 0, 0] # [forward, right, backward, left]
+        walls = [1, 1, 1, 1] # [forward, right, backward, left]
 
         # Check if there is a wall in each direction
-        if front is not None and front < self.CELL_LIMIT:
-            walls[0] = 1
-        if right is not None and right < self.CELL_LIMIT:
-            walls[1] = 1
-        if back is not None and back < self.CELL_LIMIT:
-            walls[2] = 1
-        if left is not None and left < self.CELL_LIMIT:
-            walls[3] = 1
+        if front is not None and front > self.CELL_LIMIT:
+            walls[0] = 0
+        if right is not None and right > self.CELL_LIMIT:
+            walls[1] = 0
+        if back is not None and back > self.CELL_LIMIT:
+            walls[2] = 0
+        if left is not None and left > self.CELL_LIMIT:
+            walls[3] = 0
+
+        #print(f"Wall detection: front={front}, right={right}, back={back}, left={left}")
+        #print(f"Wall presence: {walls}")
 
         return walls
 
+    def choose_action(self, position, heading, visits):
+        walls = self.check_walls()  # [front, right, back, left]
 
-    def choose_action(self):
-        walls = self.check_walls()
-        actions = ["forward", "right", "backward", "left"]
+        # Relative heading order: N, E, S, W.
+        steps = [
+            (0, 1),
+            (1, 0),
+            (0, -1),
+            (-1, 0),
+        ]
 
-        # Prefer forward movement if there are no walls
-        if walls[0] == 0:
-            return "forward"
+        # action, wall index, heading change, turn cost
+        options = [
+            ("forward",  0,  0, 0),
+            ("right",    1,  1, 1),
+            ("left",     3, -1, 1),
+            ("backward", 2,  2, 2),
+        ]
 
-        # Pick a random action
-        open_actions = [action for action, wall in zip(actions, walls) if wall == 0]
-        if open_actions:
-            return random.choice(open_actions)
-        
-        return None
+        candidates = []
+
+        # Evaluate each action and check if the corresponding wall is present
+        for action, wall_index, turn, turn_cost in options:
+            if walls[wall_index] != 0:
+                continue
+
+            next_heading = (heading + turn) % 4
+            dx, dy = steps[next_heading]
+
+            # Calculate the next position based on the current position and the direction of movement
+            next_position = (
+                position[0] + dx,
+                position[1] + dy,
+            )
+
+            # Calculate the score for this candidate
+            score = (
+                visits.get(next_position, 0),
+                turn_cost,
+            )
+
+            # Append the candidate to the list of candidates
+            candidates.append(
+                (score, action, next_position, next_heading)
+            )
+
+        if not candidates:
+            return None, position, heading
+
+        # Prefer fewer visits, then less turning.
+        # Equal scores use the order in options.
+        best = min(candidates, key=lambda candidate: candidate[0])
+
+        _, action, next_position, next_heading = best
+        return action, next_position, next_heading
 
     def execute_action(self, action):
         
         # Rotate the robot based on the action
         if action == "right":
-            self.compass_pid(-80, 0.7, 0.02, 0.05)
+            self.compass_pid(-81.5, 0.7, 0.02, 0.05)
         if action == "backward":
-            self.compass_pid(170, 0.7, 0.02, 0.05)
+            self.compass_pid(165, 0.7, 0.02, 0.05)
         if action == "left":
-            self.compass_pid(80, 0.7, 0.02, 0.05)
+            self.compass_pid(81.5, 0.7, 0.02, 0.05)
+
+        time.sleep(1)
 
         # Move forward a cell
-        self.encoder_pid(0.6, 6, 0.2, 0.4)
+        self.encoder_pid(0.61, 6, 0.2, 0.4)
+
+        time.sleep(1)
 
     def update_particle(self, particle, action):
         cell, orientation = particle
 
         directions = ["N", "E", "S", "W"]
         turns = {"forward": 0, "right": 1, "backward": 2, "left": -1}
-
+        
         # Rotate a particle based on the action 
         heading_index = (directions.index(orientation) + turns[action]) % 4
         orientation = directions[heading_index]
 
-        walls = self.MAP[cell]
+        # Update the cell based on the action and orientation
+        if self.MAP[cell][heading_index] == 0:
+            cell += [-4, 1, 4, -1][heading_index]
 
-        # Determine the new cell based on the action and orientation
-        if action == "forward":
-            if orientation == "N" and walls[0] == 0:
-                cell -= 4
-            elif orientation == "E" and walls[1] == 0:
-                cell += 1
-            elif orientation == "S" and walls[2] == 0:
-                cell += 4
-            elif orientation == "W" and walls[3] == 0:
-                cell -= 1
-
-        elif action == "right":
-            if orientation == "N" and walls[1] == 0:
-                cell += 1
-            elif orientation == "E" and walls[2] == 0:
-                cell += 4
-            elif orientation == "S" and walls[3] == 0:
-                cell -= 1
-            elif orientation == "W" and walls[0] == 0:
-                cell -= 4
-
-        elif action == "backward":
-            if orientation == "N" and walls[2] == 0:
-                cell += 4
-            elif orientation == "E" and walls[3] == 0:
-                cell -= 1
-            elif orientation == "S" and walls[0] == 0:
-                cell -= 4
-            elif orientation == "W" and walls[1] == 0:
-                cell += 1
-
-        elif action == "left":
-            if orientation == "N" and walls[3] == 0:
-                cell -= 1
-            elif orientation == "E" and walls[0] == 0:
-                cell -= 4
-            elif orientation == "S" and walls[1] == 0:
-                cell += 1
-            elif orientation == "W" and walls[2] == 0:
-                cell += 4
-
-        return (cell, orientation)
+        return cell, orientation
 
     def observe_walls(self):
         heading = self.get_heading()
@@ -646,17 +668,28 @@ class MyRobot(HamBot):
         weights = [1.0 / num_particles] * num_particles
         iteration = 0
 
+        position = (0, 0)
+        heading = 0
+        visits = {position: 1}
+
         while True: 
+            print("\n" + "="*40)
             print(f"Iteration: {iteration}")
             iteration += 1
 
             # Choose an action for the robot
-            action = self.choose_action()
+            action, next_position, next_heading = self.choose_action(position, heading, visits)
+
+            position = next_position
+            heading = next_heading
+            visits[position] = visits.get(position, 0) + 1
 
             if action is None:
                 print("No available actions: stopping robot.")
                 self.stop_motors()
                 break
+
+            print(f"Chosen action: {action}")
 
             # Execute action and move particles accordingly
             self.execute_action(action)
@@ -665,6 +698,7 @@ class MyRobot(HamBot):
 
             # Get the wall measurements 
             mes_z = self.observe_walls()
+            print(f"Measured walls: {mes_z} # (N, E, S, W)")
             for i in range(num_particles):
                 particle = particles[i]
                 cell = particle[0]
@@ -681,8 +715,11 @@ class MyRobot(HamBot):
             weights = self.normalize(weights)
 
             # Resample particles based on their weights
-            drawn = random.choices(particles, weights=weights, k=num_particles)
-            particles = [ (p[0], random.choice(['N','E','S','W'])) for p in drawn ]
+            particles = random.choices(particles, weights=weights, k=num_particles)
+
+            if iteration % 5 == 0:
+                particles = [ (p[0], random.choice(['N','E','S','W'])) for p in particles ]
+            
             weights = [1.0 / num_particles] * num_particles
 
             # Get the histogram of particle states
@@ -1026,11 +1063,11 @@ class MyRobot(HamBot):
 
             motor_speed = self.saturation(output)
 
-            print(
-                f"trav={traveled:.3f}, e={error:.3f}, "
-                f"P={proportional:.2f}, I={integral_term:.2f}, "
-                f"D={derivative_term:.2f}, speed={motor_speed:.2f}"
-            )
+            #print(
+            #    f"trav={traveled:.3f}, e={error:.3f}, "
+            #    f"P={proportional:.2f}, I={integral_term:.2f}, "
+            #    f"D={derivative_term:.2f}, speed={motor_speed:.2f}"
+            #)
 
             if abs(error) <= self.ENCODER_TOLERANCE:
                 self.stop_motors()
@@ -1092,11 +1129,11 @@ class MyRobot(HamBot):
             left_speed = self.saturation(left * output, rotate=True)
             right_speed = self.saturation(right * output, rotate=True)
 
-            print(
-                f"rotated={total_rotation:.3f}, e={error:.3f}, "
-                f"P={proportional:.2f}, I={integral_term:.2f}, "
-                f"D={derivative_term:.2f}, l_speed={left_speed:.2f}, r_speed={right_speed:.2f}"
-            )
+            #print(
+            #    f"rotated={total_rotation:.3f}, e={error:.3f}, "
+            #    f"P={proportional:.2f}, I={integral_term:.2f}, "
+            #    f"D={derivative_term:.2f}, l_speed={left_speed:.2f}, r_speed={right_speed:.2f}"
+            #)
 
             """
             # True assumes the cylinder's full width is visible, without occlusion.
