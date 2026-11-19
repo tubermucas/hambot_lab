@@ -1,7 +1,7 @@
 """Compatibility launcher for labs/lab4/task1_lab4.py.
 
 The trilateration implementation now lives in control/MyRobot.py.
-All existing --localize, --diagnose, and calibration arguments are supported.
+Run without arguments. The working calibration and trace output are built in.
 """
 
 from pathlib import Path
